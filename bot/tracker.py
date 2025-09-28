@@ -1,7 +1,7 @@
 import os
 import sys
 import shutil
-import re
+import json
 from datetime import datetime
 import pandas as pd
 import numpy as np
@@ -16,10 +16,10 @@ STOCKS_FILE = os.path.join(DATA_DIR, "tickers_stocks.txt")
 ETFS_FILE   = os.path.join(DATA_DIR, "tickers_etfs.txt")
 
 HISTORY_PERIOD = "1y"              # enough for YTD
-LOOKBACKS = {"day": 1, "month": 21}
+LOOKBACKS = {"day": 1, "month": 21}  # trading days for "month"
 RANK_HORIZON = "month"             # "day" | "month" | "ytd"
 TOP_N = 10
-TITLE = "Top 10 Stocks & ETFs — Price, Day, Month, YTD"
+TITLE = "Top 10 Stocks & ETFs — Price · Day · Month · YTD"
 TZ = "America/Chicago"
 
 # Mike's watchlist
@@ -77,6 +77,13 @@ def price_last(s):
     return float(s.iloc[-1]) if len(s) else np.nan
 
 
+def prev_close(s):
+    s = s.dropna()
+    if len(s) < 2:
+        return np.nan
+    return float(s.iloc[-2])
+
+
 def ret_over_lookback(s, lb_days):
     s = s.dropna()
     if len(s) <= lb_days:
@@ -86,7 +93,15 @@ def ret_over_lookback(s, lb_days):
     return (last / past) - 1.0
 
 
-def ret_ytd(s):
+def month_base(s):
+    """Return the close ~21 trading days ago to serve as Month baseline."""
+    s = s.dropna()
+    if len(s) <= LOOKBACKS["month"]:
+        return np.nan
+    return float(s.iloc[-(LOOKBACKS["month"] + 1)])
+
+
+def ytd_base(s):
     s = s.dropna()
     if s.empty:
         return np.nan
@@ -94,11 +109,7 @@ def ret_ytd(s):
     this_year = s[s.index.year == yr]
     if this_year.empty:
         return np.nan
-    start = float(this_year.iloc[0])
-    last  = float(s.iloc[-1])
-    if start == 0:
-        return np.nan
-    return (last / start) - 1.0
+    return float(this_year.iloc[0])
 
 
 def names_for_tickers(tickers):
@@ -122,7 +133,7 @@ def to_csv_and_json(df, name):
 
 
 def fetch_index_day_snapshot(symbol):
-    """Return (last_price, day_change_abs, day_change_pct) from the last two closes for an index."""
+    """Return (last_price, day_change_abs, day_change_pct) from last two closes for the index."""
     try:
         hist = yf.download(tickers=[symbol], period="5d", interval="1d", progress=False, auto_adjust=False)
         s = hist["Close"].dropna()
@@ -135,9 +146,8 @@ def fetch_index_day_snapshot(symbol):
         return np.nan, np.nan, np.nan
 
 
-def safe_id(symbol: str) -> str:
-    """Generate a DOM-safe id from a ticker (replace non-alnum with underscore)."""
-    return re.sub(r"[^A-Za-z0-9_]", "_", symbol)
+def fmt_pct(x):   return "—" if pd.isna(x) else f"{float(x):+.2%}"
+def fmt_price(x): return "—" if pd.isna(x) else f"{float(x):,.2f}"
 
 
 def render_html(ctx):
@@ -174,10 +184,11 @@ def render_html(ctx):
 <body>
   <h1>{{ title }}</h1>
 
-  <!-- Index banner + Refresh -->
+  <!-- Market status + indices + refresh -->
   <div class="card">
     <div class="row" style="justify-content: space-between;">
       <div class="row">
+        <div class="badge"><strong id="market_status">Market — …</strong></div>
         <div class="badge">
           <div><strong>Dow Jones (DJIA)</strong></div>
           <div class="num">$<span id="dji_price">{{ dji_price }}</span></div>
@@ -193,10 +204,10 @@ def render_html(ctx):
       </div>
       <div class="row">
         <button id="refreshBtn" title="Fetch current quotes">↻ Refresh</button>
-        <div class="muted">Updated {{ updated_human }} ({{ tz }})</div>
+        <div class="muted">Built {{ updated_human }} ({{ tz }})</div>
       </div>
     </div>
-    <div class="muted" style="margin-top:8px;">Refresh updates the index banner and table Price/Day in place. Month/YTD update on the next build.</div>
+    <div class="muted" style="margin-top:8px;">Refresh updates all table values (Price/Day/Month/YTD) and the banner. Auto-refresh every 60s.</div>
   </div>
 
   <!-- Top combined table -->
@@ -212,14 +223,14 @@ def render_html(ctx):
       </thead>
       <tbody>
         {% for r in top_rows %}
-        <tr data-symbol="{{ r['Ticker'] }}" data-id="{{ r['dom_id'] }}">
+        <tr data-symbol="{{ r['Ticker'] }}" data-prev="{{ r['PrevCloseRaw'] }}" data-mbase="{{ r['MonthBaseRaw'] }}" data-ybase="{{ r['YtdBaseRaw'] }}">
           <td>{{ loop.index }}</td>
           <td><a href="https://finance.yahoo.com/quote/{{ r['Ticker'] }}/" target="_blank" rel="noopener">{{ r['Ticker'] }}</a></td>
           <td>{{ r['Name'] }}</td>
-          <td class="num">$<span id="p_{{ r['dom_id'] }}">{{ r['Price'] }}</span></td>
-          <td class="num"><span id="d_{{ r['dom_id'] }}" class="{{ 'gain' if r['Day_val'] >= 0 else 'loss' }}">{{ r['Day'] }}</span></td>
-          <td class="num">{{ r['Month'] }}</td>
-          <td class="num">{{ r['YTD'] }}</td>
+          <td class="num">$<span id="p_{{ r['Ticker'] }}">{{ r['Price'] }}</span></td>
+          <td class="num"><span id="d_{{ r['Ticker'] }}" class="{{ 'gain' if r['Day_val'] >= 0 else 'loss' }}">{{ r['Day'] }}</span></td>
+          <td class="num"><span id="m_{{ r['Ticker'] }}" class="{{ 'gain' if r['Month_val'] >= 0 else 'loss' }}">{{ r['Month'] }}</span></td>
+          <td class="num"><span id="y_{{ r['Ticker'] }}" class="{{ 'gain' if r['YTD_val'] >= 0 else 'loss' }}">{{ r['YTD'] }}</span></td>
         </tr>
         {% endfor %}
       </tbody>
@@ -239,14 +250,14 @@ def render_html(ctx):
       </thead>
       <tbody>
         {% for r in mike_rows %}
-        <tr data-symbol="{{ r['Ticker'] }}" data-id="{{ r['dom_id'] }}">
+        <tr data-symbol="{{ r['Ticker'] }}" data-prev="{{ r['PrevCloseRaw'] }}" data-mbase="{{ r['MonthBaseRaw'] }}" data-ybase="{{ r['YtdBaseRaw'] }}">
           <td>{{ loop.index }}</td>
           <td><a href="https://finance.yahoo.com/quote/{{ r['Ticker'] }}/" target="_blank" rel="noopener">{{ r['Ticker'] }}</a></td>
           <td>{{ r['Name'] }}</td>
-          <td class="num">$<span id="p_{{ r['dom_id'] }}">{{ r['Price'] }}</span></td>
-          <td class="num"><span id="d_{{ r['dom_id'] }}" class="{{ 'gain' if r['Day_val'] >= 0 else 'loss' }}">{{ r['Day'] }}</span></td>
-          <td class="num">{{ r['Month'] }}</td>
-          <td class="num">{{ r['YTD'] }}</td>
+          <td class="num">$<span id="p_{{ r['Ticker'] }}">{{ r['Price'] }}</span></td>
+          <td class="num"><span id="d_{{ r['Ticker'] }}" class="{{ 'gain' if r['Day_val'] >= 0 else 'loss' }}">{{ r['Day'] }}</span></td>
+          <td class="num"><span id="m_{{ r['Ticker'] }}" class="{{ 'gain' if r['Month_val'] >= 0 else 'loss' }}">{{ r['Month'] }}</span></td>
+          <td class="num"><span id="y_{{ r['Ticker'] }}" class="{{ 'gain' if r['YTD_val'] >= 0 else 'loss' }}">{{ r['YTD'] }}</span></td>
         </tr>
         {% endfor %}
       </tbody>
@@ -258,103 +269,130 @@ def render_html(ctx):
   </footer>
 
 <script>
-  // Data bootstrap for refresh
-  const REFRESH_SYMBOLS = {{ refresh_symbols_json | safe }};  // array of symbols to fetch (Top10 ∪ Mike)
-  const ID_MAP = {{ id_map_json | safe }};                    // {"TICKER": "DOM_SAFE_ID", ...}
+  // Tickers we will refresh (Top10 ∪ Mike)
+  const REFRESH_SYMBOLS = {{ refresh_symbols_json | safe }};
 
-  async function refreshIndices() {
+  function fmtPrice(x){ return (x ?? 0).toFixed(2); }
+  function fmtPct(x){ return (x >= 0 ? "+" : "") + (x ?? 0).toFixed(2) + "%"; }
+  function setMarketStatus(state){
+    let label = "Market — …";
+    if (state === "REGULAR") label = "Market Open";
+    else if (state === "PRE") label = "Pre-Market";
+    else if (state === "POST") label = "After Hours";
+    else if (state === "CLOSED") label = "Market Closed";
+    document.getElementById("market_status").textContent = label;
+  }
+
+  function recomputeAndRender(sym, quote){
+    const row = document.querySelector(`tr[data-symbol="${sym}"]`);
+    if (!row) return;
+    const prev = parseFloat(row.getAttribute("data-prev")) || (quote.regularMarketPreviousClose ?? NaN);
+    const mbase = parseFloat(row.getAttribute("data-mbase"));
+    const ybase = parseFloat(row.getAttribute("data-ybase"));
+    const price = quote.regularMarketPrice ?? quote.price ?? NaN;
+
+    if (!isNaN(price)) {
+      const pEl = document.getElementById("p_"+sym);
+      if (pEl) pEl.textContent = fmtPrice(price);
+    }
+
+    // Day %
+    let dayPct = null;
+    if (!isNaN(prev) && prev !== 0 && !isNaN(price)) {
+      dayPct = (price/prev - 1) * 100.0;
+    } else if (quote.regularMarketChangePercent != null) {
+      dayPct = +quote.regularMarketChangePercent;
+    }
+    const dEl = document.getElementById("d_"+sym);
+    if (dEl && dayPct != null) {
+      dEl.textContent = fmtPct(dayPct);
+      dEl.className = dayPct >= 0 ? "gain" : "loss";
+    }
+
+    // Month %
+    const mEl = document.getElementById("m_"+sym);
+    if (mEl && !isNaN(mbase) && mbase !== 0 && !isNaN(price)) {
+      const mPct = (price/mbase - 1) * 100.0;
+      mEl.textContent = fmtPct(mPct);
+      mEl.className = mPct >= 0 ? "gain" : "loss";
+    }
+
+    // YTD %
+    const yEl = document.getElementById("y_"+sym);
+    if (yEl && !isNaN(ybase) && ybase !== 0 && !isNaN(price)) {
+      const yPct = (price/ybase - 1) * 100.0;
+      yEl.textContent = fmtPct(yPct);
+      yEl.className = yPct >= 0 ? "gain" : "loss";
+    }
+  }
+
+  async function refreshIndices(){
     const url = "https://query1.finance.yahoo.com/v7/finance/quote?symbols=%5EDJI,%5EGSPC";
     try {
-      const r = await fetch(url, {cache: "no-store"});
+      const r = await fetch(url, {cache:"no-store"});
       const j = await r.json();
       const res = (j && j.quoteResponse && j.quoteResponse.result) || [];
-      const bySym = {};
-      for (const it of res) bySym[it.symbol] = it;
-      function absStr(x){ return (x >= 0 ? "+" : "") + (x || 0).toFixed(2); }
-      function pctStr(x){ return (x >= 0 ? "+" : "") + (x || 0).toFixed(2) + "%"; }
+      const by = {}; for (const it of res) by[it.symbol] = it;
 
-      const dji = bySym["^DJI"];
+      const dji = by["^DJI"];
       if (dji) {
-        document.getElementById("dji_price").textContent = (dji.regularMarketPrice ?? 0).toFixed(2);
-        const chg = dji.regularMarketChange ?? 0;
-        const chgPct = dji.regularMarketChangePercent ?? 0;
-        const cls = chg >= 0 ? "gain" : "loss";
-        const djiChg = document.getElementById("dji_chg");
-        const djiChgPct = document.getElementById("dji_chg_pct");
-        djiChg.textContent = absStr(chg);
-        djiChgPct.textContent = pctStr(chgPct);
-        djiChg.className = cls; djiChgPct.className = cls;
+        document.getElementById("dji_price").textContent = fmtPrice(dji.regularMarketPrice ?? 0);
+        const djiChg = dji.regularMarketChange ?? 0;
+        const djiPct = dji.regularMarketChangePercent ?? 0;
+        const cls = djiChg >= 0 ? "gain" : "loss";
+        const el1 = document.getElementById("dji_chg");
+        const el2 = document.getElementById("dji_chg_pct");
+        el1.textContent = (djiChg >= 0 ? "+" : "") + djiChg.toFixed(2);
+        el2.textContent = fmtPct(djiPct);
+        el1.className = cls; el2.className = cls;
       }
 
-      const gspc = bySym["^GSPC"];
+      const gspc = by["^GSPC"];
       if (gspc) {
-        document.getElementById("gspc_price").textContent = (gspc.regularMarketPrice ?? 0).toFixed(2);
+        document.getElementById("gspc_price").textContent = fmtPrice(gspc.regularMarketPrice ?? 0);
         const chg = gspc.regularMarketChange ?? 0;
-        const chgPct = gspc.regularMarketChangePercent ?? 0;
+        const pct = gspc.regularMarketChangePercent ?? 0;
         const cls = chg >= 0 ? "gain" : "loss";
         const el1 = document.getElementById("gspc_chg");
         const el2 = document.getElementById("gspc_chg_pct");
-        el1.textContent = absStr(chg);
-        el2.textContent = pctStr(chgPct);
+        el1.textContent = (chg >= 0 ? "+" : "") + chg.toFixed(2);
+        el2.textContent = fmtPct(pct);
         el1.className = cls; el2.className = cls;
+
+        // market status from S&P quote
+        setMarketStatus(gspc.marketState || "CLOSED");
       }
-    } catch (e) { console.log("Index refresh failed:", e); }
+    } catch(e){ console.log("Index refresh failed:", e); }
   }
 
-  async function refreshTables() {
+  async function refreshTables(){
     if (!REFRESH_SYMBOLS.length) return;
-    // Yahoo supports comma-separated symbols; keep requests comfortably sized
-    const chunks = [];
-    const size = 40;
-    for (let i=0; i<REFRESH_SYMBOLS.length; i+=size) chunks.push(REFRESH_SYMBOLS.slice(i, i+size));
-
-    function pctStr(x){ return (x >= 0 ? "+" : "") + (x || 0).toFixed(2) + "%"; }
-
+    const url = "https://query1.finance.yahoo.com/v7/finance/quote?symbols=" +
+                encodeURIComponent(REFRESH_SYMBOLS.join(","));
     try {
-      for (const group of chunks) {
-        const url = "https://query1.finance.yahoo.com/v7/finance/quote?symbols=" +
-          encodeURIComponent(group.join(","));
-        const r = await fetch(url, {cache: "no-store"});
-        const j = await r.json();
-        const res = (j && j.quoteResponse && j.quoteResponse.result) || [];
-        for (const it of res) {
-          const sym = it.symbol;
-          const id = ID_MAP[sym];
-          if (!id) continue;
-
-          const price = it.regularMarketPrice ?? it.price ?? null;
-          const chgPct = it.regularMarketChangePercent ?? null;
-
-          if (price !== null) {
-            const pEl = document.getElementById("p_" + id);
-            if (pEl) pEl.textContent = (+price).toFixed(2);
-          }
-          if (chgPct !== null) {
-            const dEl = document.getElementById("d_" + id);
-            if (dEl) {
-              const v = +chgPct;
-              dEl.textContent = (v >= 0 ? "+" : "") + v.toFixed(2) + "%";
-              dEl.className = v >= 0 ? "gain" : "loss";
-            }
-          }
-        }
+      const r = await fetch(url, {cache:"no-store"});
+      const j = await r.json();
+      const res = (j && j.quoteResponse && j.quoteResponse.result) || [];
+      for (const it of res) {
+        recomputeAndRender(it.symbol, it);
       }
-    } catch (e) { console.log("Table refresh failed:", e); }
+    } catch(e){ console.log("Table refresh failed:", e); }
   }
 
-  async function doRefresh() {
+  async function doRefresh(){
     await Promise.all([refreshIndices(), refreshTables()]);
   }
+
   document.getElementById("refreshBtn").addEventListener("click", doRefresh);
+  // Auto-refresh every 60s
+  setInterval(doRefresh, 60000);
+  // Also refresh once on page load
+  doRefresh();
 </script>
 </body>
 </html>
     """.strip())
     return template.render(**ctx)
-
-
-def fmt_pct(x):   return "—" if pd.isna(x) else f"{float(x):+.2%}"
-def fmt_price(x): return "—" if pd.isna(x) else f"{float(x):,.2f}"
 
 
 def main():
@@ -369,14 +407,23 @@ def main():
     all_symbols = list(dict.fromkeys(universe + MIKE_TICKERS))
     histories = fetch_histories(all_symbols)
 
-    # Compute metrics for all symbols
+    # Compute metrics & baselines for all symbols
     rows = []
     for t, s in histories.items():
-        price = price_last(s)
-        day   = ret_over_lookback(s, LOOKBACKS["day"])
-        month = ret_over_lookback(s, LOOKBACKS["month"])
-        ytd   = ret_ytd(s)
-        rows.append({"Ticker": t, "Price": price, "Day": day, "Month": month, "YTD": ytd})
+        last_price = price_last(s)
+        prev = prev_close(s)
+        mbase = month_base(s)
+        ybase = ytd_base(s)
+
+        day   = (last_price / prev - 1.0) if (pd.notna(last_price) and pd.notna(prev) and prev != 0) else np.nan
+        month = (last_price / mbase - 1.0) if (pd.notna(last_price) and pd.notna(mbase) and mbase != 0) else np.nan
+        ytd   = (last_price / ybase - 1.0) if (pd.notna(last_price) and pd.notna(ybase) and ybase != 0) else np.nan
+
+        rows.append({
+            "Ticker": t, "Price": last_price,
+            "PrevClose": prev, "MonthBase": mbase, "YtdBase": ybase,
+            "Day": day, "Month": month, "YTD": ytd
+        })
     df = pd.DataFrame(rows)
 
     # Names
@@ -397,20 +444,23 @@ def main():
     to_csv_and_json(df_top[["Ticker","Name","Price","Day","Month","YTD"]], "top_combined")
     to_csv_and_json(df_mike[["Ticker","Name","Price","Day","Month","YTD"]], "mike_watchlist")
 
-    # DOM-safe ids + HTML rows
+    # Prepare HTML rows including baselines for JS refresh
     def rows_for_html(df_):
         out = []
         for _, r in df_.iterrows():
-            price = float(r["Price"]) if pd.notna(r["Price"]) else np.nan
-            d = float(r["Day"]) if pd.notna(r["Day"]) else np.nan
-            m = float(r["Month"]) if pd.notna(r["Month"]) else np.nan
-            y = float(r["YTD"]) if pd.notna(r["YTD"]) else np.nan
-            dom_id = safe_id(r["Ticker"])
+            price = r["Price"]; d = r["Day"]; m = r["Month"]; y = r["YTD"]
             out.append({
-                "Ticker": r["Ticker"], "Name": r["Name"], "dom_id": dom_id,
-                "Price": fmt_price(price),
-                "Day": fmt_pct(d), "Month": fmt_pct(m), "YTD": fmt_pct(y),
-                "Day_val": 0.0 if pd.isna(d) else d,
+                "Ticker": r["Ticker"], "Name": r["Name"],
+                "Price": "—" if pd.isna(price) else f"{float(price):,.2f}",
+                "Day": "—" if pd.isna(d) else f"{float(d):+.2%}",
+                "Month": "—" if pd.isna(m) else f"{float(m):+.2%}",
+                "YTD": "—" if pd.isna(y) else f"{float(y):+.2%}",
+                "Day_val": 0.0 if pd.isna(d) else float(d),
+                "Month_val": 0.0 if pd.isna(m) else float(m),
+                "YTD_val": 0.0 if pd.isna(y) else float(y),
+                "PrevCloseRaw": "" if pd.isna(r["PrevClose"]) else float(r["PrevClose"]),
+                "MonthBaseRaw": "" if pd.isna(r["MonthBase"]) else float(r["MonthBase"]),
+                "YtdBaseRaw": "" if pd.isna(r["YtdBase"]) else float(r["YtdBase"]),
             })
         return out
 
@@ -419,7 +469,6 @@ def main():
 
     # Symbols to refresh on page (Top10 ∪ Mike)
     refresh_symbols = sorted(set(df_top["Ticker"].tolist()) | set(df_mike["Ticker"].tolist()))
-    id_map = {t: safe_id(t) for t in refresh_symbols}
 
     # Seed index banner from last two closes
     dji_last, dji_chg_abs, dji_chg_pct = fetch_index_day_snapshot("^DJI")
@@ -434,18 +483,16 @@ def main():
         "top_n": TOP_N,
         "top_rows": top_rows,
         "mike_rows": mike_rows,
-        # refresh data
-        "refresh_symbols_json": pd.io.json.dumps(refresh_symbols),
-        "id_map_json": pd.io.json.dumps(id_map),
+        "refresh_symbols_json": json.dumps(refresh_symbols),
         # indices
         "dji_price": "—" if pd.isna(dji_last) else f"{dji_last:,.2f}",
         "dji_chg": "—" if pd.isna(dji_chg_abs) else f"{dji_chg_abs:+,.2f}",
         "dji_chg_pct": "—" if pd.isna(dji_chg_pct) else f"{dji_chg_pct:+.2%}",
-        "dji_chg_val": 0 if pd.isna(dji_chg_abs) else dji_chg_abs,
+        "dji_chg_val": 0 if pd.isna(dji_chg_abs) else float(dji_chg_abs),
         "gspc_price": "—" if pd.isna(gspc_last) else f"{gspc_last:,.2f}",
         "gspc_chg": "—" if pd.isna(gspc_chg_abs) else f"{gspc_chg_abs:+,.2f}",
         "gspc_chg_pct": "—" if pd.isna(gspc_chg_pct) else f"{gspc_chg_pct:+.2%}",
-        "gspc_chg_val": 0 if pd.isna(gspc_chg_abs) else gspc_chg_abs,
+        "gspc_chg_val": 0 if pd.isna(gspc_chg_abs) else float(gspc_chg_abs),
     })
     with open(os.path.join(OUT_DIR, "index.html"), "w", encoding="utf-8") as f:
         f.write(html)
@@ -457,7 +504,7 @@ def main():
             snap[c] = (snap[c] * 100.0).round(3)
     snap.to_csv(os.path.join(OUT_DIR, "returns_snapshot.csv"), index=False)
 
-    print("✅ Built page with live Refresh for indices + table Price/Day.")
+    print("✅ Built page with full live refresh (Price/Day/Month/YTD) + market status.")
     
 
 if __name__ == "__main__":

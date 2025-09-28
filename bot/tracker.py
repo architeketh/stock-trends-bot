@@ -1,6 +1,5 @@
 import os
 import sys
-import json
 from datetime import datetime
 import pandas as pd
 import numpy as np
@@ -21,27 +20,29 @@ os.makedirs(OUT_DIR, exist_ok=True)
 os.makedirs(CHART_DIR, exist_ok=True)
 
 STOCKS_FILE = os.path.join(DATA_DIR, "tickers_stocks.txt")
-ETFS_FILE = os.path.join(DATA_DIR, "tickers_etfs.txt")
+ETFS_FILE   = os.path.join(DATA_DIR, "tickers_etfs.txt")
 
-# How far back we download daily candles. Needs to be long enough for monthly returns + charts.
-HISTORY_PERIOD = "6mo"
+# Download enough history to compute YTD
+HISTORY_PERIOD = "1y"
 
-# "Weekly" ≈ 5 trading days; "Monthly" ≈ 21 trading days (trading days, not calendar)
+# Lookbacks in trading days
 LOOKBACKS = {
-    "daily": 1,     # last close vs previous close
-    "weekly": 5,    # last close vs 5 trading days ago
-    "monthly": 21   # last close vs 21 trading days ago
+    "day": 1,       # last close vs previous close
+    "month": 21     # ~1 month (trading days)
 }
 
-TOP_N = 10
-TITLE = "Top 10 Stocks & ETFs by Returns"
-TZ = "America/Chicago"  # display only (not used by yfinance)
+# Which horizon to use to rank the combined Top-10 table
+RANK_HORIZON = "month"   # options: "day" or "month" or "ytd"
 
-# Chart settings
-CHART_LOOKBACK_DAYS = 30         # trading days of history for daily % change bars
-CHART_WIDTH_PX = 360
-CHART_HEIGHT_PX = 140
-DPI = 2.0                        # scale factor for crispness
+TOP_N = 10
+TITLE = "Top 10 (Stocks + ETFs) — Combined Leaderboard"
+TZ = "America/Chicago"  # display only
+
+# Chart settings (single grouped-bar chart for Top-10)
+TOP10_CHART_FILENAME = "top10_returns.png"
+CHART_WIDTH_IN = 12
+CHART_HEIGHT_IN = 5
+CHART_DPI = 144
 # ----------------------------
 
 
@@ -83,9 +84,12 @@ def fetch_histories(tickers):
             except KeyError:
                 continue
     else:
-        close = df["Close"].dropna()
-        if not close.empty:
-            histories[tickers[0]] = close
+        try:
+            close = df["Close"].dropna()
+            if not close.empty:
+                histories[tickers[0]] = close
+        except Exception:
+            pass
 
     return histories
 
@@ -104,30 +108,47 @@ def compute_point_changes(close_series):
     return last, prev, chg, chg_pct
 
 
-def compute_returns(close_series):
+def compute_return_over_lookback(close_series, lb_days):
     """
-    Given a Series of Close prices, compute returns for each horizon in LOOKBACKS.
-    Returns dict with 'daily','weekly','monthly' (floats) or np.nan if not enough data.
+    last / price_{lb_days_ago} - 1
     """
-    res = {}
-    closes = close_series.dropna()
-    if len(closes) < 2:
-        return {k: np.nan for k in LOOKBACKS.keys()}
-    last = closes.iloc[-1]
-    for label, lb in LOOKBACKS.items():
-        if len(closes) > lb:
-            past = closes.iloc[-(lb+1)]
-            ret = (last / past) - 1.0
-            res[label] = float(ret)
-        else:
-            res[label] = np.nan
-    return res
+    s = close_series.dropna()
+    if len(s) <= lb_days:
+        return np.nan
+    last = float(s.iloc[-1])
+    past = float(s.iloc[-(lb_days+1)])
+    return (last / past) - 1.0
 
 
-def leaderboard(df, horizon, top_n=TOP_N):
-    d = df[~df[horizon].isna()].sort_values(by=horizon, ascending=False).head(top_n).copy()
-    d[horizon + "_pct"] = (d[horizon] * 100.0).round(2)
-    return d
+def compute_ytd_return(close_series):
+    """
+    last / first_close_of_current_year - 1
+    """
+    s = close_series.dropna()
+    if s.empty:
+        return np.nan
+    year = s.index[-1].year
+    s_this_year = s[s.index.year == year]
+    if s_this_year.empty:
+        return np.nan
+    start = float(s_this_year.iloc[0])
+    last = float(s.iloc[-1])
+    if start == 0:
+        return np.nan
+    return (last / start) - 1.0
+
+
+def get_names_for_tickers(tickers):
+    """Best-effort metadata fetch. Falls back to ticker if not available."""
+    names = {}
+    info = yf.Tickers(" ".join(tickers))
+    for t in tickers:
+        try:
+            nm = info.tickers[t].info.get("shortName") or info.tickers[t].info.get("longName")
+            names[t] = nm if nm else t
+        except Exception:
+            names[t] = t
+    return names
 
 
 def to_csv_and_json(df, name):
@@ -154,76 +175,67 @@ def render_html(context):
   body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; margin: 24px; color: var(--fg); background: var(--bg); }
   h1 { margin: 0 0 8px; font-size: 1.75rem; }
   .muted { color: var(--muted); font-size: 0.9rem; margin-bottom: 20px; }
-  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(360px, 1fr)); gap: 20px; }
-  .card { border: 1px solid rgba(127,127,127,0.3); border-radius: 10px; padding: 14px; }
+  .card { border: 1px solid rgba(127,127,127,0.3); border-radius: 10px; padding: 14px; margin-bottom: 18px; }
   table { width: 100%; border-collapse: collapse; }
   th, td { text-align: left; padding: 8px; border-bottom: 1px dashed rgba(127,127,127,0.3); vertical-align: middle; }
   th { font-weight: 700; }
-  .pill { display:inline-block; padding: 2px 8px; border-radius: 999px; background: rgba(11,87,208,0.12); color: var(--accent); font-size: 0.8rem; }
-  .pct { font-variant-numeric: tabular-nums; font-feature-settings: "tnum"; white-space: nowrap; }
-  .price { font-variant-numeric: tabular-nums; }
+  .pct, .price { font-variant-numeric: tabular-nums; font-feature-settings: "tnum"; white-space: nowrap; }
   .gain { color: var(--gain); }
   .loss { color: var(--loss); }
-  img.chart { display:block; width: 180px; height: auto; opacity: 0.9; }
   footer{ margin-top: 28px; color: var(--muted); font-size: 0.85rem; }
   a { color: var(--accent); text-decoration: none; }
   a:hover { text-decoration: underline; }
-  .rowwrap { display:flex; align-items:center; gap:10px; }
+  img.chart { max-width: 100%; height: auto; display: block; }
 </style>
 </head>
 <body>
   <h1>{{ title }}</h1>
-  <div class="muted">Updated {{ updated_human }} ({{ tz }}). Universe: {{ stock_count }} stocks, {{ etf_count }} ETFs. Prices use the latest available daily close.</div>
+  <div class="muted">Updated {{ updated_human }} ({{ tz }}). Universe scanned: {{ universe_count }} tickers. Ranked by <b>{{ rank_horizon|upper }}</b> return.</div>
 
-  {% for section in sections %}
   <div class="card">
-    <h2 style="margin:0 0 8px 0;">{{ section.heading }}</h2>
+    <h2 style="margin:0 0 8px 0;">Combined Top {{ top_n }} (Stocks + ETFs)</h2>
     <div class="muted">
-      Top {{ section.top_n }} by {{ section.horizon|capitalize }} return. 
-      <a href="{{ section.csv_name }}.csv">CSV</a> · <a href="{{ section.csv_name }}.json">JSON</a>
+      <a href="top_combined.csv">CSV</a> · <a href="top_combined.json">JSON</a>
     </div>
-    <div class="grid">
-      {% for table in section.tables %}
-      <div>
-        <div class="pill">{{ table.label }}</div>
-        <table>
-          <thead>
-            <tr>
-              <th>Ticker</th>
-              <th>Name</th>
-              <th class="price">Price</th>
-              <th class="pct">Δ (abs)</th>
-              <th class="pct">Δ%</th>
-              <th class="pct">Return</th>
-              <th>Chart</th>
-            </tr>
-          </thead>
-          <tbody>
-            {% for row in table.rows %}
-            <tr>
-              <td><a href="https://finance.yahoo.com/quote/{{ row['Ticker'] }}/" target="_blank" rel="noopener">{{ row['Ticker'] }}</a></td>
-              <td>{{ row['Name'] }}</td>
-              <td class="price">${{ row['Price'] }}</td>
-              <td class="pct {{ 'gain' if row['Chg'] >=0 else 'loss' }}">{{ row['Chg_str'] }}</td>
-              <td class="pct {{ 'gain' if row['ChgPct'] >=0 else 'loss' }}">{{ row['ChgPct_str'] }}</td>
-              <td class="pct">{{ row['Return'] }}%</td>
-              <td>
-                {% if row['Chart'] %}
-                <img class="chart" src="{{ row['Chart'] }}" alt="{{ row['Ticker'] }} daily % change ({{ chart_days }}d)">
-                {% else %}-{% endif %}
-              </td>
-            </tr>
-            {% endfor %}
-          </tbody>
-        </table>
-      </div>
-      {% endfor %}
-    </div>
+    <table>
+      <thead>
+        <tr>
+          <th>#</th>
+          <th>Ticker</th>
+          <th>Name</th>
+          <th class="price">Price</th>
+          <th class="pct">Δ (abs)</th>
+          <th class="pct">Δ%</th>
+          <th class="pct">Day</th>
+          <th class="pct">Month</th>
+          <th class="pct">YTD</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in rows %}
+        <tr>
+          <td>{{ loop.index }}</td>
+          <td><a href="https://finance.yahoo.com/quote/{{ row['Ticker'] }}/" target="_blank" rel="noopener">{{ row['Ticker'] }}</a></td>
+          <td>{{ row['Name'] }}</td>
+          <td class="price">${{ row['Price'] }}</td>
+          <td class="pct {{ 'gain' if row['Chg'] >= 0 else 'loss' }}">{{ row['Chg_str'] }}</td>
+          <td class="pct {{ 'gain' if row['ChgPct'] >= 0 else 'loss' }}">{{ row['ChgPct_str'] }}</td>
+          <td class="pct {{ 'gain' if row['Day'] >= 0 else 'loss' }}">{{ row['Day_str'] }}</td>
+          <td class="pct {{ 'gain' if row['Month'] >= 0 else 'loss' }}">{{ row['Month_str'] }}</td>
+          <td class="pct {{ 'gain' if row['YTD'] >= 0 else 'loss' }}">{{ row['YTD_str'] }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
   </div>
-  {% endfor %}
+
+  <div class="card">
+    <h2 style="margin:0 0 8px 0;">Top {{ top_n }} — Day / Month / YTD Returns</h2>
+    <img class="chart" src="charts/{{ top10_chart_filename }}" alt="Grouped bar chart: Day / Month / YTD returns for Top {{ top_n }}">
+  </div>
 
   <footer>
-    Built by GitHub Actions with yfinance & matplotlib. Not investment advice. Data may be delayed or adjusted.
+    Built by GitHub Actions with yfinance &amp; matplotlib. Not investment advice. Data may be delayed or adjusted.
   </footer>
 </body>
 </html>
@@ -231,157 +243,142 @@ def render_html(context):
     return template.render(**context)
 
 
-def get_names_for_tickers(tickers):
-    """Best-effort metadata fetch. Falls back to ticker if not available."""
-    names = {}
-    info = yf.Tickers(" ".join(tickers))
-    for t in tickers:
-        try:
-            nm = info.tickers[t].info.get("shortName") or info.tickers[t].info.get("longName")
-            names[t] = nm if nm else t
-        except Exception:
-            names[t] = t
-    return names
-
-
-def make_daily_gain_chart(ticker, close_series, out_dir=CHART_DIR, lookback=CHART_LOOKBACK_DAYS):
+def build_top10_chart(df_top, out_path):
     """
-    Save a small bar chart of daily % changes over last `lookback` trading days.
-    Returns relative path to saved image or '' if not enough data.
+    df_top: DataFrame with columns Ticker, Day, Month, YTD (floats, fraction not %), sorted by rank.
+    Produces a grouped bar chart.
     """
-    s = close_series.dropna().astype(float)
-    if len(s) < 3:
-        return ""
+    tickers = df_top["Ticker"].tolist()
+    day = (df_top["Day"].values * 100.0).astype(float)
+    month = (df_top["Month"].values * 100.0).astype(float)
+    ytd = (df_top["YTD"].values * 100.0).astype(float)
 
-    # Daily % change (r_t = Close_t / Close_{t-1} - 1)
-    r = s.pct_change().dropna()
-    r = r.iloc[-lookback:] if len(r) > lookback else r
+    x = np.arange(len(tickers))
+    width = 0.26
 
-    # Prepare figure
-    fig_w = CHART_WIDTH_PX / (96 * 1/DPI)
-    fig_h = CHART_HEIGHT_PX / (96 * 1/DPI)
-    fig, ax = plt.subplots(figsize=(fig_w, fig_h), dpi=96*DPI)
-    ax.bar(range(len(r)), r.values)
+    fig, ax = plt.subplots(figsize=(CHART_WIDTH_IN, CHART_HEIGHT_IN), dpi=CHART_DPI)
+    ax.bar(x - width, day, width, label="Day")
+    ax.bar(x,         month, width, label="Month")
+    ax.bar(x + width, ytd, width, label="YTD")
+    ax.set_xticks(x)
+    ax.set_xticklabels(tickers, rotation=0, ha="center")
     ax.axhline(0, linewidth=0.8)
-    ax.set_xticks([])
-    ax.set_yticks([])
-    ax.set_xlim(-0.5, len(r)-0.5)
-    ax.set_title(f"{ticker} daily % change", fontsize=8, pad=4)
-    for spine in ax.spines.values():
-        spine.set_visible(False)
-
-    out_path = os.path.join(out_dir, f"{ticker}.png")
-    fig.tight_layout(pad=0.2)
+    ax.set_ylabel("%")
+    ax.set_title("Top 10: Day / Month / YTD")
+    ax.legend()
+    fig.tight_layout()
     fig.savefig(out_path, transparent=False)
     plt.close(fig)
-
-    # Return relative path for HTML
-    rel = f"charts/{ticker}.png"
-    return rel
 
 
 def main():
     stocks = read_tickers(STOCKS_FILE, default=["AAPL","MSFT","NVDA","AMZN","GOOGL","META"])
     etfs   = read_tickers(ETFS_FILE,   default=["SPY","QQQ","DIA","IWM","TLT","SMH","ARKK"])
+    universe = list(dict.fromkeys(stocks + etfs))  # dedupe keep order
 
     # Fetch price histories (batched)
-    hist_stocks = fetch_histories(stocks)
-    hist_etfs   = fetch_histories(etfs)
+    histories = fetch_histories(universe)
 
-    # Compute metrics
+    # Compute metrics per ticker
     rows = []
-    chart_map = {}  # ticker -> relative chart path
-    for universe, store in [("Stock", hist_stocks), ("ETF", hist_etfs)]:
-        for t, s in store.items():
-            # Point-in-time values
-            last, prev, chg_abs, chg_pct = compute_point_changes(s)
-            # Returns
-            r = compute_returns(s)
-            rows.append({
-                "Ticker": t,
-                "Universe": universe,
-                "Price": last,
-                "Prev": prev,
-                "Chg": chg_abs,
-                "ChgPct": chg_pct,
-                **r
-            })
-            # Chart
-            chart_map[t] = make_daily_gain_chart(t, s)
+    for t, s in histories.items():
+        price, prev, chg_abs, chg_pct = compute_point_changes(s)
+        day_ret = compute_return_over_lookback(s, LOOKBACKS["day"])
+        month_ret = compute_return_over_lookback(s, LOOKBACKS["month"])
+        ytd_ret = compute_ytd_return(s)
+
+        rows.append({
+            "Ticker": t,
+            "Price": price,
+            "Chg": chg_abs,
+            "ChgPct": chg_pct,
+            "Day": day_ret,
+            "Month": month_ret,
+            "YTD": ytd_ret
+        })
 
     df = pd.DataFrame(rows)
 
     # Names
-    names = get_names_for_tickers(list(df["Ticker"])) if not df.empty else {}
+    names = get_names_for_tickers(df["Ticker"].tolist()) if not df.empty else {}
     df["Name"] = df["Ticker"].map(names).fillna(df["Ticker"])
 
-    # Build leaderboards + files + HTML rows
-    sections = []
-    updated_human = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+    # Rank & select Top-10 combined
+    if RANK_HORIZON.lower() not in {"day", "month", "ytd"}:
+        rank_col = "Month"
+    else:
+        rank_col = {"day": "Day", "month": "Month", "ytd": "YTD"}[RANK_HORIZON.lower()]
 
-    for horizon in ["daily", "weekly", "monthly"]:
-        lb_stocks = leaderboard(df[df["Universe"]=="Stock"], horizon)
-        lb_etfs   = leaderboard(df[df["Universe"]=="ETF"], horizon)
-        lb_all    = leaderboard(df, horizon)
+    df_top = df[~df[rank_col].isna()].sort_values(by=rank_col, ascending=False).head(TOP_N).copy()
 
-        # Save machine-readable outputs with the added price/change fields
-        cols_common = ["Ticker","Name","Universe","Price","Chg","ChgPct",horizon]
-        _ = to_csv_and_json(lb_all[cols_common],   f"top_{horizon}_overall")
-        _ = to_csv_and_json(lb_stocks[[c for c in cols_common if c!="Universe"]], f"top_{horizon}_stocks")
-        _ = to_csv_and_json(lb_etfs[[c for c in cols_common if c!="Universe"]],   f"top_{horizon}_etfs")
+    # Pretty strings for HTML
+    def fmt_pct(x):
+        return "—" if pd.isna(x) else f"{float(x):+.2%}"
 
-        # Rows for HTML: add pretty strings
-        def rows_for_html(df_):
-            out = []
-            for _, r in df_.iterrows():
-                chg = float(r["Chg"]) if pd.notna(r["Chg"]) else np.nan
-                chg_pct = float(r["ChgPct"]) if pd.notna(r["ChgPct"]) else np.nan
-                out.append({
-                    "Ticker": r["Ticker"],
-                    "Name": r["Name"],
-                    "Price": f"{float(r['Price']):,.2f}" if pd.notna(r["Price"]) else "—",
-                    "Chg": chg if pd.notna(chg) else 0.0,
-                    "Chg_str": (f"{chg:+,.2f}" if pd.notna(chg) else "—"),
-                    "ChgPct": chg_pct if pd.notna(chg_pct) else 0.0,
-                    "ChgPct_str": (f"{chg_pct:+.2%}" if pd.notna(chg_pct) else "—"),
-                    "Return": round(float(r[horizon])*100.0, 2) if pd.notna(r[horizon]) else "—",
-                    "Chart": chart_map.get(r["Ticker"], "")
-                })
-            return out
+    def fmt_price(x):
+        return "—" if pd.isna(x) else f"{float(x):,.2f}"
 
-        sections.append({
-            "heading": f"Top {TOP_N} — {horizon.capitalize()} Returns",
-            "horizon": horizon,
-            "top_n": TOP_N,
-            "csv_name": f"top_{horizon}_overall",
-            "tables": [
-                {"label": "Overall (Stocks + ETFs)", "rows": rows_for_html(lb_all)},
-                {"label": "Stocks Only", "rows": rows_for_html(lb_stocks)},
-                {"label": "ETFs Only", "rows": rows_for_html(lb_etfs)},
-            ],
+    def fmt_abs(x):
+        return "—" if pd.isna(x) else f"{float(x):+,.2f}"
+
+    rows_html = []
+    for _, r in df_top.iterrows():
+        price = float(r["Price"]) if pd.notna(r["Price"]) else np.nan
+        chg   = float(r["Chg"]) if pd.notna(r["Chg"]) else np.nan
+        chgp  = float(r["ChgPct"]) if pd.notna(r["ChgPct"]) else np.nan
+        d     = float(r["Day"]) if pd.notna(r["Day"]) else np.nan
+        m     = float(r["Month"]) if pd.notna(r["Month"]) else np.nan
+        y     = float(r["YTD"]) if pd.notna(r["YTD"]) else np.nan
+
+        rows_html.append({
+            "Ticker": r["Ticker"],
+            "Name": r["Name"],
+            "Price": fmt_price(price),
+            "Chg": chg if not np.isnan(chg) else 0.0,
+            "Chg_str": fmt_abs(chg),
+            "ChgPct": chgp if not np.isnan(chgp) else 0.0,
+            "ChgPct_str": fmt_pct(chgp),
+            "Day": d if not np.isnan(d) else 0.0,
+            "Day_str": fmt_pct(d),
+            "Month": m if not np.isnan(m) else 0.0,
+            "Month_str": fmt_pct(m),
+            "YTD": y if not np.isnan(y) else 0.0,
+            "YTD_str": fmt_pct(y),
         })
 
-    # Render site
+    # Save machine-readable combined Top-10
+    _ = to_csv_and_json(
+        df_top[["Ticker","Name","Price","Chg","ChgPct","Day","Month","YTD"]],
+        "top_combined"
+    )
+
+    # Build the single grouped-bar chart
+    chart_path = os.path.join(CHART_DIR, TOP10_CHART_FILENAME)
+    build_top10_chart(df_top[["Ticker","Day","Month","YTD"]], chart_path)
+
+    # Render HTML
+    updated_human = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
     html = render_html({
         "title": TITLE,
         "updated_human": updated_human,
         "tz": TZ,
-        "stock_count": len(hist_stocks),
-        "etf_count": len(hist_etfs),
-        "sections": sections,
-        "chart_days": CHART_LOOKBACK_DAYS
+        "universe_count": len(histories),
+        "top_n": TOP_N,
+        "rows": rows_html,
+        "rank_horizon": rank_col,
+        "top10_chart_filename": TOP10_CHART_FILENAME
     })
     with open(os.path.join(OUT_DIR, "index.html"), "w", encoding="utf-8") as f:
         f.write(html)
 
-    # Snapshot for debugging
+    # Debug snapshot (in % for returns)
     snap = df.copy()
-    for h in ["daily","weekly","monthly","ChgPct"]:
-        if h in snap:
-            snap[h] = (snap[h] * 100.0).round(3)
+    for c in ["ChgPct","Day","Month","YTD"]:
+        if c in snap:
+            snap[c] = (snap[c] * 100.0).round(3)
     snap.to_csv(os.path.join(OUT_DIR, "returns_snapshot.csv"), index=False)
 
-    print("✅ Site generated in docs/index.html with prices, daily changes, and charts")
+    print(f"✅ Site generated: docs/index.html with combined Top {TOP_N} and single Day/Month/YTD chart (ranked by {rank_col})")
 
 
 if __name__ == "__main__":

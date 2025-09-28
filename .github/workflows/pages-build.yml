@@ -2,16 +2,15 @@ name: Build & Publish (Top 10 Stocks/ETFs)
 
 on:
   schedule:
-    # Weekdays ~22:15 UTC ≈ 5:15pm America/Chicago during CDT; adjust if you like
-    - cron: "15 22 * * 1-5"
+    - cron: "15 22 * * 1-5"     # weekdays ~5:15pm America/Chicago
   workflow_dispatch:
   push:
     branches: [ main ]
 
 permissions:
   contents: read
-  pages: write
-  id-token: write
+  pages: write        # REQUIRED for deploy
+  id-token: write     # REQUIRED for OIDC
 
 concurrency:
   group: "pages"
@@ -20,6 +19,11 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    # This ties the deployment to the special github-pages environment
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
     steps:
       - uses: actions/checkout@v4
 
@@ -36,14 +40,20 @@ jobs:
       - name: Build site
         run: python bot/tracker.py
 
+      # Enable + configure Pages for this repo (prevents the 404)
       - name: Setup Pages
         uses: actions/configure-pages@v5
+        with:
+          enablement: true
+          token: ${{ secrets.GITHUB_TOKEN }}
 
+      # Upload the generated static site
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
           path: docs
 
+      # Publish to GitHub Pages
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4

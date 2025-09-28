@@ -34,13 +34,13 @@ LOOKBACKS = {
 
 TOP_N = 10
 TITLE = "Top 10 Stocks & ETFs by Returns"
-TZ = "America/Chicago"  # display only (not used by yfinance)
+TZ = "America/Chicago"  # display only
 
 # Chart settings
-CHART_LOOKBACK_DAYS = 30   # trading days of history for daily % change bars
+CHART_LOOKBACK_DAYS = 30   # trading days for daily % change bars
 CHART_WIDTH_PX = 360
 CHART_HEIGHT_PX = 140
-DPI = 2.0                  # scale factor for crispness
+CHART_DPI = 144            # final image DPI
 # ----------------------------
 
 
@@ -82,9 +82,13 @@ def fetch_histories(tickers):
             except KeyError:
                 continue
     else:
-        close = df["Close"].dropna()
-        if not close.empty:
-            histories[tickers[0]] = close
+        # single-ticker frame
+        try:
+            close = df["Close"].dropna()
+            if not close.empty:
+                histories[tickers[0]] = close
+        except Exception:
+            pass
 
     return histories
 
@@ -115,7 +119,7 @@ def compute_returns(close_series):
     last = closes.iloc[-1]
     for label, lb in LOOKBACKS.items():
         if len(closes) > lb:
-            past = closes.iloc[-(lb+1)]
+            past = closes.iloc[-(lb + 1)]
             ret = (last / past) - 1.0
             res[label] = float(ret)
         else:
@@ -251,10 +255,10 @@ def make_daily_gain_chart(ticker, close_series, out_dir=CHART_DIR, lookback=CHAR
     r = s.pct_change().dropna()
     r = r.iloc[-lookback:] if len(r) > lookback else r
 
-    # Convert pixels to inches for matplotlib: inches = px / dpi
-    fig_w_in = CHART_WIDTH_PX / (96 * (1 / DPI))
-    fig_h_in = CHART_HEIGHT_PX / (96 * (1 / DPI))
-    fig, ax = plt.subplots(figsize=(fig_w_in, fig_h_in), dpi=96 * DPI)
+    # Size in inches = pixels / dpi
+    fig_w_in = CHART_WIDTH_PX / CHART_DPI
+    fig_h_in = CHART_HEIGHT_PX / CHART_DPI
+    fig, ax = plt.subplots(figsize=(fig_w_in, fig_h_in), dpi=CHART_DPI)
     ax.bar(range(len(r)), r.values)
     ax.axhline(0, linewidth=0.8)
     ax.set_xticks([])
@@ -332,17 +336,21 @@ def main():
     def rows_for_html(df_, horizon):
         out = []
         for _, r in df_.iterrows():
+            # Force scalars to avoid "truth value of a Series is ambiguous"
+            price = float(r["Price"]) if pd.notna(r["Price"]) else np.nan
             chg = float(r["Chg"]) if pd.notna(r["Chg"]) else np.nan
             chg_pct = float(r["ChgPct"]) if pd.notna(r["ChgPct"]) else np.nan
+            ret = float(r[horizon]) if pd.notna(r[horizon]) else np.nan
+
             out.append({
                 "Ticker": r["Ticker"],
                 "Name": r["Name"],
-                "Price": f"{float(r['Price']):,.2f}" if pd.notna(r["Price"]) else "—",
-                "Chg": chg if pd.notna(chg) else 0.0,
-                "Chg_str": (f"{chg:+,.2f}" if pd.notna(chg) else "—"),
-                "ChgPct": chg_pct if pd.notna(chg_pct) else 0.0,
-                "ChgPct_str": (f"{chg_pct:+.2%}" if pd.notna(chg_pct) else "—"),
-                "Return": round(float(r[horizon]) * 100.0, 2) if pd.notna(r[horizon]) else "—",
+                "Price": f"{price:,.2f}" if not np.isnan(price) else "—",
+                "Chg": chg if not np.isnan(chg) else 0.0,
+                "Chg_str": f"{chg:+,.2f}" if not np.isnan(chg) else "—",
+                "ChgPct": chg_pct if not np.isnan(chg_pct) else 0.0,
+                "ChgPct_str": f"{chg_pct:+.2%}" if not np.isnan(chg_pct) else "—",
+                "Return": round(ret * 100.0, 2) if not np.isnan(ret) else "—",
                 "Chart": chart_map.get(r["Ticker"], "")
             })
         return out
@@ -353,8 +361,8 @@ def main():
         # Save machine-readable outputs (with price/change fields)
         cols_common = ["Ticker","Name","Universe","Price","Chg","ChgPct",horizon]
         _ = to_csv_and_json(lb_all[cols_common],   f"top_{horizon}_overall")
-        _ = to_csv_and_json(lb_stocks[[c for c in cols_common if c!="Universe"]], f"top_{horizon}_stocks")
-        _ = to_csv_and_json(lb_etfs[[c for c in cols_common if c!="Universe"]],   f"top_{horizon}_etfs")
+        _ = to_csv_and_json(lb_stocks[[c for c in cols_common if c != "Universe"]], f"top_{horizon}_stocks")
+        _ = to_csv_and_json(lb_etfs[[c for c in cols_common if c != "Universe"]],   f"top_{horizon}_etfs")
 
         sections.append({
             "heading": f"Top {TOP_N} — {horizon.capitalize()} Returns",

@@ -321,4 +321,6 @@ def main():
 
     for horizon in ["daily", "weekly", "monthly"]:
         lb_stocks = leaderboard(df[df["Universe"]=="Stock"], horizon)
-        lb_etfs   = leaderboard(df[df["Universe"]=="ETF"]_
+        lb_etfs   = leaderboard(df[df["Universe"]=="ETF"], horizon)
+        lb_all    = leaderboard(df, horizon)
+

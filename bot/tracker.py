@@ -1,6 +1,5 @@
 import os
 import sys
-import json
 from datetime import datetime
 import pandas as pd
 import numpy as np
@@ -38,10 +37,10 @@ TITLE = "Top 10 Stocks & ETFs by Returns"
 TZ = "America/Chicago"  # display only (not used by yfinance)
 
 # Chart settings
-CHART_LOOKBACK_DAYS = 30         # trading days of history for daily % change bars
+CHART_LOOKBACK_DAYS = 30   # trading days of history for daily % change bars
 CHART_WIDTH_PX = 360
 CHART_HEIGHT_PX = 140
-DPI = 2.0                        # scale factor for crispness
+DPI = 2.0                  # scale factor for crispness
 # ----------------------------
 
 
@@ -168,7 +167,6 @@ def render_html(context):
   footer{ margin-top: 28px; color: var(--muted); font-size: 0.85rem; }
   a { color: var(--accent); text-decoration: none; }
   a:hover { text-decoration: underline; }
-  .rowwrap { display:flex; align-items:center; gap:10px; }
 </style>
 </head>
 <body>
@@ -207,11 +205,7 @@ def render_html(context):
               <td class="pct {{ 'gain' if row['Chg'] >=0 else 'loss' }}">{{ row['Chg_str'] }}</td>
               <td class="pct {{ 'gain' if row['ChgPct'] >=0 else 'loss' }}">{{ row['ChgPct_str'] }}</td>
               <td class="pct">{{ row['Return'] }}%</td>
-              <td>
-                {% if row['Chart'] %}
-                <img class="chart" src="{{ row['Chart'] }}" alt="{{ row['Ticker'] }} daily % change ({{ chart_days }}d)">
-                {% else %}-{% endif %}
-              </td>
+              <td>{% if row['Chart'] %}<img class="chart" src="{{ row['Chart'] }}" alt="{{ row['Ticker'] }} daily % change ({{ chart_days }}d)">{% else %}-{% endif %}</td>
             </tr>
             {% endfor %}
           </tbody>
@@ -257,15 +251,15 @@ def make_daily_gain_chart(ticker, close_series, out_dir=CHART_DIR, lookback=CHAR
     r = s.pct_change().dropna()
     r = r.iloc[-lookback:] if len(r) > lookback else r
 
-    # Prepare figure
-    fig_w = CHART_WIDTH_PX / (96 * 1/DPI)
-    fig_h = CHART_HEIGHT_PX / (96 * 1/DPI)
-    fig, ax = plt.subplots(figsize=(fig_w, fig_h), dpi=96*DPI)
+    # Convert pixels to inches for matplotlib: inches = px / dpi
+    fig_w_in = CHART_WIDTH_PX / (96 * (1 / DPI))
+    fig_h_in = CHART_HEIGHT_PX / (96 * (1 / DPI))
+    fig, ax = plt.subplots(figsize=(fig_w_in, fig_h_in), dpi=96 * DPI)
     ax.bar(range(len(r)), r.values)
     ax.axhline(0, linewidth=0.8)
     ax.set_xticks([])
     ax.set_yticks([])
-    ax.set_xlim(-0.5, len(r)-0.5)
+    ax.set_xlim(-0.5, len(r) - 0.5)
     ax.set_title(f"{ticker} daily % change", fontsize=8, pad=4)
     for spine in ax.spines.values():
         spine.set_visible(False)
@@ -276,8 +270,7 @@ def make_daily_gain_chart(ticker, close_series, out_dir=CHART_DIR, lookback=CHAR
     plt.close(fig)
 
     # Return relative path for HTML
-    rel = f"charts/{ticker}.png"
-    return rel
+    return f"charts/{ticker}.png"
 
 
 def main():
@@ -288,14 +281,11 @@ def main():
     hist_stocks = fetch_histories(stocks)
     hist_etfs   = fetch_histories(etfs)
 
-    # Compute metrics
+    # Compute metrics (no charts yet)
     rows = []
-    chart_map = {}  # ticker -> relative chart path
     for universe, store in [("Stock", hist_stocks), ("ETF", hist_etfs)]:
         for t, s in store.items():
-            # Point-in-time values
             last, prev, chg_abs, chg_pct = compute_point_changes(s)
-            # Returns
             r = compute_returns(s)
             rows.append({
                 "Ticker": t,
@@ -306,8 +296,6 @@ def main():
                 "ChgPct": chg_pct,
                 **r
             })
-            # Chart
-            chart_map[t] = make_daily_gain_chart(t, s)
 
     df = pd.DataFrame(rows)
 
@@ -315,12 +303,97 @@ def main():
     names = get_names_for_tickers(list(df["Ticker"])) if not df.empty else {}
     df["Name"] = df["Ticker"].map(names).fillna(df["Ticker"])
 
-    # Build leaderboards + files + HTML rows
-    sections = []
     updated_human = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
 
+    # Build *all* leaderboards and collect union of Top-10 tickers (any horizon, any table)
+    leaders = {}
+    tickers_to_chart = set()
+
     for horizon in ["daily", "weekly", "monthly"]:
-        lb_stocks = leaderboard(df[df["Universe"]=="Stock"], horizon)
-        lb_etfs   = leaderboard(df[df["Universe"]=="ETF"], horizon)
+        lb_stocks = leaderboard(df[df["Universe"] == "Stock"], horizon)
+        lb_etfs   = leaderboard(df[df["Universe"] == "ETF"], horizon)
         lb_all    = leaderboard(df, horizon)
 
+        leaders[horizon] = (lb_stocks, lb_etfs, lb_all)
+
+        for d in (lb_stocks, lb_etfs, lb_all):
+            tickers_to_chart.update(d["Ticker"].tolist())
+
+    # Now create charts only for the union of all Top-10 tickers
+    chart_map = {}
+    for t in sorted(tickers_to_chart):
+        series = hist_stocks.get(t) or hist_etfs.get(t)
+        if series is not None:
+            chart_map[t] = make_daily_gain_chart(t, series)
+
+    # Build sections from cached leaderboards
+    sections = []
+
+    def rows_for_html(df_, horizon):
+        out = []
+        for _, r in df_.iterrows():
+            chg = float(r["Chg"]) if pd.notna(r["Chg"]) else np.nan
+            chg_pct = float(r["ChgPct"]) if pd.notna(r["ChgPct"]) else np.nan
+            out.append({
+                "Ticker": r["Ticker"],
+                "Name": r["Name"],
+                "Price": f"{float(r['Price']):,.2f}" if pd.notna(r["Price"]) else "—",
+                "Chg": chg if pd.notna(chg) else 0.0,
+                "Chg_str": (f"{chg:+,.2f}" if pd.notna(chg) else "—"),
+                "ChgPct": chg_pct if pd.notna(chg_pct) else 0.0,
+                "ChgPct_str": (f"{chg_pct:+.2%}" if pd.notna(chg_pct) else "—"),
+                "Return": round(float(r[horizon]) * 100.0, 2) if pd.notna(r[horizon]) else "—",
+                "Chart": chart_map.get(r["Ticker"], "")
+            })
+        return out
+
+    for horizon in ["daily", "weekly", "monthly"]:
+        lb_stocks, lb_etfs, lb_all = leaders[horizon]
+
+        # Save machine-readable outputs (with price/change fields)
+        cols_common = ["Ticker","Name","Universe","Price","Chg","ChgPct",horizon]
+        _ = to_csv_and_json(lb_all[cols_common],   f"top_{horizon}_overall")
+        _ = to_csv_and_json(lb_stocks[[c for c in cols_common if c!="Universe"]], f"top_{horizon}_stocks")
+        _ = to_csv_and_json(lb_etfs[[c for c in cols_common if c!="Universe"]],   f"top_{horizon}_etfs")
+
+        sections.append({
+            "heading": f"Top {TOP_N} — {horizon.capitalize()} Returns",
+            "horizon": horizon,
+            "top_n": TOP_N,
+            "csv_name": f"top_{horizon}_overall",
+            "tables": [
+                {"label": "Overall (Stocks + ETFs)", "rows": rows_for_html(lb_all, horizon)},
+                {"label": "Stocks Only", "rows": rows_for_html(lb_stocks, horizon)},
+                {"label": "ETFs Only", "rows": rows_for_html(lb_etfs, horizon)},
+            ],
+        })
+
+    # Render site
+    html = render_html({
+        "title": TITLE,
+        "updated_human": updated_human,
+        "tz": TZ,
+        "stock_count": len(hist_stocks),
+        "etf_count": len(hist_etfs),
+        "sections": sections,
+        "chart_days": CHART_LOOKBACK_DAYS
+    })
+    with open(os.path.join(OUT_DIR, "index.html"), "w", encoding="utf-8") as f:
+        f.write(html)
+
+    # Snapshot for debugging
+    snap = df.copy()
+    for h in ["daily","weekly","monthly","ChgPct"]:
+        if h in snap:
+            snap[h] = (snap[h] * 100.0).round(3)
+    snap.to_csv(os.path.join(OUT_DIR, "returns_snapshot.csv"), index=False)
+
+    print("✅ Site generated in docs/index.html with prices, daily changes, and charts (leaders only)")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as e:
+        print("ERROR:", e)
+        sys.exit(1)

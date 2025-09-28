@@ -15,14 +15,14 @@ OUT_DIR  = os.path.join(ROOT, "docs")
 STOCKS_FILE = os.path.join(DATA_DIR, "tickers_stocks.txt")
 ETFS_FILE   = os.path.join(DATA_DIR, "tickers_etfs.txt")
 
-HISTORY_PERIOD = "1y"              # enough for YTD
-LOOKBACKS = {"day": 1, "month": 21}  # trading days for "month"
-RANK_HORIZON = "month"             # "day" | "month" | "ytd"
+HISTORY_PERIOD = "1y"                 # enough for YTD
+LOOKBACKS = {"day": 1, "month": 21}   # trading days for "month"
+RANK_HORIZON = "month"                # "day" | "month" | "ytd"
 TOP_N = 10
 TITLE = "Top 10 Stocks & ETFs — Price · Day · Month · YTD"
 TZ = "America/Chicago"
 
-# Mike's watchlist
+# Mike's watchlist (kept as provided; missing tickers are skipped gracefully)
 MIKE_TICKERS = [
     "VOO","VOOG","VUG","VDIGX","QQQM","AAPL","NVDA","IVV","IWF","SE",
     "FBTC","VV","FXAIZ","AMZN","CLX","CRM","GBTC","ALRM"
@@ -45,8 +45,15 @@ def read_tickers(path, default=None):
     return lines
 
 
+def _to_scalar(x):
+    try:
+        return float(x.item()) if hasattr(x, "item") else float(x)
+    except Exception:
+        return float("nan")
+
+
 def fetch_histories(tickers):
-    """Return dict[ticker] -> Series of Close prices."""
+    """Return dict[ticker] -> Series of Close prices. Skip tickers with no data."""
     if not tickers:
         return {}
     df = yf.download(
@@ -74,31 +81,23 @@ def fetch_histories(tickers):
 
 def price_last(s):
     s = s.dropna()
-    return float(s.iloc[-1]) if len(s) else np.nan
+    if len(s) == 0:
+        return np.nan
+    return _to_scalar(s.iloc[-1])
 
 
 def prev_close(s):
     s = s.dropna()
     if len(s) < 2:
         return np.nan
-    return float(s.iloc[-2])
-
-
-def ret_over_lookback(s, lb_days):
-    s = s.dropna()
-    if len(s) <= lb_days:
-        return np.nan
-    last = float(s.iloc[-1])
-    past = float(s.iloc[-(lb_days + 1)])
-    return (last / past) - 1.0
+    return _to_scalar(s.iloc[-2])
 
 
 def month_base(s):
-    """Return the close ~21 trading days ago to serve as Month baseline."""
     s = s.dropna()
     if len(s) <= LOOKBACKS["month"]:
         return np.nan
-    return float(s.iloc[-(LOOKBACKS["month"] + 1)])
+    return _to_scalar(s.iloc[-(LOOKBACKS["month"] + 1)])
 
 
 def ytd_base(s):
@@ -109,12 +108,15 @@ def ytd_base(s):
     this_year = s[s.index.year == yr]
     if this_year.empty:
         return np.nan
-    return float(this_year.iloc[0])
+    return _to_scalar(this_year.iloc[0])
 
 
 def names_for_tickers(tickers):
     names = {}
-    info = yf.Tickers(" ".join(tickers))
+    try:
+        info = yf.Tickers(" ".join(tickers))
+    except Exception:
+        return {t: t for t in tickers}
     for t in tickers:
         try:
             nm = info.tickers[t].info.get("shortName") or info.tickers[t].info.get("longName")
@@ -124,14 +126,6 @@ def names_for_tickers(tickers):
     return names
 
 
-def to_csv_and_json(df, name):
-    csv_path = os.path.join(OUT_DIR, f"{name}.csv")
-    json_path = os.path.join(OUT_DIR, f"{name}.json")
-    df.to_csv(csv_path, index=False)
-    df.to_json(json_path, orient="records", indent=2)
-    return csv_path, json_path
-
-
 def fetch_index_day_snapshot(symbol):
     """Return (last_price, day_change_abs, day_change_pct) from last two closes for the index."""
     try:
@@ -139,8 +133,10 @@ def fetch_index_day_snapshot(symbol):
         s = hist["Close"].dropna()
         if len(s) < 2:
             return np.nan, np.nan, np.nan
-        last = float(s.iloc[-1]); prev = float(s.iloc[-2])
-        chg = last - prev; chg_pct = (chg / prev) if prev != 0 else np.nan
+        last = _to_scalar(s.iloc[-1])
+        prev = _to_scalar(s.iloc[-2])
+        chg = last - prev
+        chg_pct = (chg / prev) if prev != 0 else np.nan
         return last, chg, chg_pct
     except Exception:
         return np.nan, np.nan, np.nan
@@ -159,9 +155,9 @@ def render_html(ctx):
 <title>{{ title }}</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
-  :root { --fg:#111; --bg:#fff; --muted:#666; --gain:#0a7f3f; --loss:#a60023; --accent:#0b57d0; }
+  :root { --fg:#111; --bg:#fff; --muted:#666; --gain:#0a7f3f; --loss:#a60023; --accent:#0b57d0; --pulse:#c7f0d8; }
   @media (prefers-color-scheme: dark) {
-    :root { --fg:#eaeaea; --bg:#0b0b0b; --muted:#9aa0a6; --gain:#4cd26b; --loss:#ff6b81; --accent:#7aa2ff; }
+    :root { --fg:#eaeaea; --bg:#0b0b0b; --muted:#9aa0a6; --gain:#4cd26b; --loss:#ff6b81; --accent:#7aa2ff; --pulse:#123d27; }
   }
   body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; margin: 24px; color: var(--fg); background: var(--bg); }
   h1 { margin: 0 0 8px; font-size: 1.75rem; }
@@ -172,10 +168,9 @@ def render_html(ctx):
   .num { font-variant-numeric: tabular-nums; white-space: nowrap; }
   .gain { color: var(--gain); }
   .loss { color: var(--loss); }
-  a { color: var(--accent); text-decoration: none; }
-  a:hover { text-decoration: underline; }
-  button { padding: 8px 12px; border-radius: 10px; border: 1px solid rgba(127,127,127,0.4); background: transparent; cursor: pointer; }
-  button:hover { background: rgba(11,87,208,0.08); }
+  .status { font-weight: 700; }
+  .pulse { animation: pulse-bg 0.6s ease; }
+  @keyframes pulse-bg { 0% { background: var(--pulse); } 100% { background: transparent; } }
   table { width: 100%; border-collapse: collapse; }
   th, td { text-align: left; padding: 8px; border-bottom: 1px dashed rgba(127,127,127,0.3); }
   th { font-weight: 700; }
@@ -184,11 +179,11 @@ def render_html(ctx):
 <body>
   <h1>{{ title }}</h1>
 
-  <!-- Market status + indices + refresh -->
-  <div class="card">
+  <!-- Market status + indices -->
+  <div class="card" id="banner">
     <div class="row" style="justify-content: space-between;">
       <div class="row">
-        <div class="badge"><strong id="market_status">Market — …</strong></div>
+        <div class="badge"><span class="status" id="market_status">Market …</span></div>
         <div class="badge">
           <div><strong>Dow Jones (DJIA)</strong></div>
           <div class="num">$<span id="dji_price">{{ dji_price }}</span></div>
@@ -203,17 +198,15 @@ def render_html(ctx):
         </div>
       </div>
       <div class="row">
-        <button id="refreshBtn" title="Fetch current quotes">↻ Refresh</button>
-        <div class="muted">Built {{ updated_human }} ({{ tz }})</div>
+        <div class="muted">Last updated: <span id="last_updated">—</span> (CT)</div>
       </div>
     </div>
-    <div class="muted" style="margin-top:8px;">Refresh updates all table values (Price/Day/Month/YTD) and the banner. Auto-refresh every 60s.</div>
+    <div class="muted" style="margin-top:8px;">Auto-refreshing every 60 seconds. Day/Month/YTD recomputed from live price.</div>
   </div>
 
   <!-- Top combined table -->
   <div class="card">
     <h2 style="margin:0 0 8px 0;">Combined Top {{ top_n }} (Stocks + ETFs)</h2>
-    <div class="muted" style="margin-bottom:8px;"><a href="top_combined.csv">CSV</a> · <a href="top_combined.json">JSON</a></div>
     <table>
       <thead>
         <tr>
@@ -240,7 +233,6 @@ def render_html(ctx):
   <!-- Mike's list -->
   <div class="card">
     <h2 style="margin:0 0 8px 0;">Mike's Stocks & ETFs</h2>
-    <div class="muted" style="margin-bottom:8px;"><a href="mike_watchlist.csv">CSV</a> · <a href="mike_watchlist.json">JSON</a></div>
     <table>
       <thead>
         <tr>
@@ -269,44 +261,52 @@ def render_html(ctx):
   </footer>
 
 <script>
-  // Tickers we will refresh (Top10 ∪ Mike)
   const REFRESH_SYMBOLS = {{ refresh_symbols_json | safe }};
 
   function fmtPrice(x){ return (x ?? 0).toFixed(2); }
   function fmtPct(x){ return (x >= 0 ? "+" : "") + (x ?? 0).toFixed(2) + "%"; }
+  function pulse(el){ if(!el) return; el.classList.add("pulse"); setTimeout(()=>el.classList.remove("pulse"), 600); }
+  function setUpdatedNow(){
+    const d = new Date();
+    const hh = String(d.getHours()).padStart(2,"0");
+    const mm = String(d.getMinutes()).padStart(2,"0");
+    const ss = String(d.getSeconds()).padStart(2,"0");
+    const el = document.getElementById("last_updated");
+    el.textContent = `${hh}:${mm}:${ss}`;
+    pulse(document.getElementById("banner"));
+  }
   function setMarketStatus(state){
-    let label = "Market — …";
+    let label = "Market Closed";
     if (state === "REGULAR") label = "Market Open";
     else if (state === "PRE") label = "Pre-Market";
     else if (state === "POST") label = "After Hours";
-    else if (state === "CLOSED") label = "Market Closed";
     document.getElementById("market_status").textContent = label;
   }
 
   function recomputeAndRender(sym, quote){
     const row = document.querySelector(`tr[data-symbol="${sym}"]`);
     if (!row) return;
-    const prev = parseFloat(row.getAttribute("data-prev")) || (quote.regularMarketPreviousClose ?? NaN);
+
+    const prev  = parseFloat(row.getAttribute("data-prev"));
     const mbase = parseFloat(row.getAttribute("data-mbase"));
     const ybase = parseFloat(row.getAttribute("data-ybase"));
     const price = quote.regularMarketPrice ?? quote.price ?? NaN;
 
+    // Price
     if (!isNaN(price)) {
       const pEl = document.getElementById("p_"+sym);
-      if (pEl) pEl.textContent = fmtPrice(price);
+      if (pEl){ pEl.textContent = fmtPrice(price); pulse(pEl); }
     }
 
     // Day %
-    let dayPct = null;
-    if (!isNaN(prev) && prev !== 0 && !isNaN(price)) {
-      dayPct = (price/prev - 1) * 100.0;
-    } else if (quote.regularMarketChangePercent != null) {
-      dayPct = +quote.regularMarketChangePercent;
-    }
     const dEl = document.getElementById("d_"+sym);
+    let dayPct = null;
+    if (!isNaN(prev) && prev !== 0 && !isNaN(price)) dayPct = (price/prev - 1) * 100.0;
+    else if (quote.regularMarketChangePercent != null) dayPct = +quote.regularMarketChangePercent;
     if (dEl && dayPct != null) {
       dEl.textContent = fmtPct(dayPct);
       dEl.className = dayPct >= 0 ? "gain" : "loss";
+      pulse(dEl);
     }
 
     // Month %
@@ -315,6 +315,7 @@ def render_html(ctx):
       const mPct = (price/mbase - 1) * 100.0;
       mEl.textContent = fmtPct(mPct);
       mEl.className = mPct >= 0 ? "gain" : "loss";
+      pulse(mEl);
     }
 
     // YTD %
@@ -323,6 +324,7 @@ def render_html(ctx):
       const yPct = (price/ybase - 1) * 100.0;
       yEl.textContent = fmtPct(yPct);
       yEl.className = yPct >= 0 ? "gain" : "loss";
+      pulse(yEl);
     }
   }
 
@@ -336,30 +338,31 @@ def render_html(ctx):
 
       const dji = by["^DJI"];
       if (dji) {
-        document.getElementById("dji_price").textContent = fmtPrice(dji.regularMarketPrice ?? 0);
-        const djiChg = dji.regularMarketChange ?? 0;
-        const djiPct = dji.regularMarketChangePercent ?? 0;
-        const cls = djiChg >= 0 ? "gain" : "loss";
-        const el1 = document.getElementById("dji_chg");
-        const el2 = document.getElementById("dji_chg_pct");
-        el1.textContent = (djiChg >= 0 ? "+" : "") + djiChg.toFixed(2);
-        el2.textContent = fmtPct(djiPct);
-        el1.className = cls; el2.className = cls;
+        const price = dji.regularMarketPrice ?? 0;
+        const chg = dji.regularMarketChange ?? 0;
+        const pct = dji.regularMarketChangePercent ?? 0;
+        const cls = chg >= 0 ? "gain" : "loss";
+        const pEl = document.getElementById("dji_price");
+        const aEl = document.getElementById("dji_chg");
+        const pPct = document.getElementById("dji_chg_pct");
+        if (pEl){ pEl.textContent = fmtPrice(price); pulse(pEl); }
+        if (aEl){ aEl.textContent = (chg>=0?"+":"") + chg.toFixed(2); aEl.className = cls; pulse(aEl); }
+        if (pPct){ pPct.textContent = fmtPct(pct); pPct.className = cls; pulse(pPct); }
       }
 
       const gspc = by["^GSPC"];
       if (gspc) {
-        document.getElementById("gspc_price").textContent = fmtPrice(gspc.regularMarketPrice ?? 0);
+        const price = gspc.regularMarketPrice ?? 0;
         const chg = gspc.regularMarketChange ?? 0;
         const pct = gspc.regularMarketChangePercent ?? 0;
         const cls = chg >= 0 ? "gain" : "loss";
-        const el1 = document.getElementById("gspc_chg");
-        const el2 = document.getElementById("gspc_chg_pct");
-        el1.textContent = (chg >= 0 ? "+" : "") + chg.toFixed(2);
-        el2.textContent = fmtPct(pct);
-        el1.className = cls; el2.className = cls;
-
-        // market status from S&P quote
+        const pEl = document.getElementById("gspc_price");
+        const aEl = document.getElementById("gspc_chg");
+        const pPct = document.getElementById("gspc_chg_pct");
+        if (pEl){ pEl.textContent = fmtPrice(price); pulse(pEl); }
+        if (aEl){ aEl.textContent = (chg>=0?"+":"") + chg.toFixed(2); aEl.className = cls; pulse(aEl); }
+        if (pPct){ pPct.textContent = fmtPct(pct); pPct.className = cls; pulse(pPct); }
+        // Update market status from S&P quote
         setMarketStatus(gspc.marketState || "CLOSED");
       }
     } catch(e){ console.log("Index refresh failed:", e); }
@@ -367,26 +370,29 @@ def render_html(ctx):
 
   async function refreshTables(){
     if (!REFRESH_SYMBOLS.length) return;
-    const url = "https://query1.finance.yahoo.com/v7/finance/quote?symbols=" +
-                encodeURIComponent(REFRESH_SYMBOLS.join(","));
-    try {
-      const r = await fetch(url, {cache:"no-store"});
-      const j = await r.json();
-      const res = (j && j.quoteResponse && j.quoteResponse.result) || [];
-      for (const it of res) {
-        recomputeAndRender(it.symbol, it);
-      }
-    } catch(e){ console.log("Table refresh failed:", e); }
+    const size = 40;
+    for (let i=0; i<REFRESH_SYMBOLS.length; i+=size) {
+      const group = REFRESH_SYMBOLS.slice(i, i+size);
+      const url = "https://query1.finance.yahoo.com/v7/finance/quote?symbols=" + encodeURIComponent(group.join(","));
+      try {
+        const r = await fetch(url, {cache:"no-store"});
+        const j = await r.json();
+        const res = (j && j.quoteResponse && j.quoteResponse.result) || [];
+        for (const it of res) {
+          if (!it || !it.symbol) continue;
+          recomputeAndRender(it.symbol, it);
+        }
+      } catch(e){ console.log("Table refresh failed:", e); }
+    }
   }
 
   async function doRefresh(){
     await Promise.all([refreshIndices(), refreshTables()]);
+    setUpdatedNow();
   }
 
-  document.getElementById("refreshBtn").addEventListener("click", doRefresh);
-  // Auto-refresh every 60s
+  // Auto-refresh every 60s + initial load
   setInterval(doRefresh, 60000);
-  // Also refresh once on page load
   doRefresh();
 </script>
 </body>
@@ -407,9 +413,12 @@ def main():
     all_symbols = list(dict.fromkeys(universe + MIKE_TICKERS))
     histories = fetch_histories(all_symbols)
 
-    # Compute metrics & baselines for all symbols
+    # Compute metrics & baselines (skip symbols with no history)
     rows = []
-    for t, s in histories.items():
+    for t in all_symbols:
+        s = histories.get(t)
+        if s is None or len(s.dropna()) == 0:
+            continue
         last_price = price_last(s)
         prev = prev_close(s)
         mbase = month_base(s)
@@ -440,11 +449,7 @@ def main():
     df_mike["__order"] = df_mike["Ticker"].map(order_map)
     df_mike = df_mike.sort_values("__order").drop(columns="__order")
 
-    # Save machine-readable
-    to_csv_and_json(df_top[["Ticker","Name","Price","Day","Month","YTD"]], "top_combined")
-    to_csv_and_json(df_mike[["Ticker","Name","Price","Day","Month","YTD"]], "mike_watchlist")
-
-    # Prepare HTML rows including baselines for JS refresh
+    # Prepare HTML rows including baselines (used by JS for live recompute)
     def rows_for_html(df_):
         out = []
         for _, r in df_.iterrows():
@@ -497,14 +502,7 @@ def main():
     with open(os.path.join(OUT_DIR, "index.html"), "w", encoding="utf-8") as f:
         f.write(html)
 
-    # Debug snapshot
-    snap = df.copy()
-    for c in ["Day","Month","YTD"]:
-        if c in snap:
-            snap[c] = (snap[c] * 100.0).round(3)
-    snap.to_csv(os.path.join(OUT_DIR, "returns_snapshot.csv"), index=False)
-
-    print("✅ Built page with full live refresh (Price/Day/Month/YTD) + market status.")
+    print("✅ Built page with full live auto-refresh (Price/Day/Month/YTD) + market status. Missing tickers skipped.")
     
 
 if __name__ == "__main__":

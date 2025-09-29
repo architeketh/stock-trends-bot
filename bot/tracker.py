@@ -29,12 +29,10 @@ MIKE_TICKERS = [
 ]
 # ----------------------------
 
-
 def clean_output_dir():
     if os.path.isdir(OUT_DIR):
         shutil.rmtree(OUT_DIR)
     os.makedirs(OUT_DIR, exist_ok=True)
-
 
 def read_tickers(path, default=None):
     default = default or []
@@ -44,13 +42,11 @@ def read_tickers(path, default=None):
         lines = [x.strip() for x in f if x.strip() and not x.startswith("#")]
     return lines
 
-
 def _to_scalar(x):
     try:
         return float(x.item()) if hasattr(x, "item") else float(x)
     except Exception:
         return float("nan")
-
 
 def fetch_histories(tickers):
     """Return dict[ticker] -> Series of Close prices. Skip tickers with no data."""
@@ -78,13 +74,11 @@ def fetch_histories(tickers):
             pass
     return out
 
-
 def price_last(s):
     s = s.dropna()
     if len(s) == 0:
         return np.nan
     return _to_scalar(s.iloc[-1])
-
 
 def prev_close(s):
     s = s.dropna()
@@ -92,13 +86,11 @@ def prev_close(s):
         return np.nan
     return _to_scalar(s.iloc[-2])
 
-
 def month_base(s):
     s = s.dropna()
     if len(s) <= LOOKBACKS["month"]:
         return np.nan
     return _to_scalar(s.iloc[-(LOOKBACKS["month"] + 1)])
-
 
 def ytd_base(s):
     s = s.dropna()
@@ -109,7 +101,6 @@ def ytd_base(s):
     if this_year.empty:
         return np.nan
     return _to_scalar(this_year.iloc[0])
-
 
 def names_for_tickers(tickers):
     names = {}
@@ -124,7 +115,6 @@ def names_for_tickers(tickers):
         except Exception:
             names[t] = t
     return names
-
 
 def fetch_index_day_snapshot(symbol):
     """Return (last_price, day_change_abs, day_change_pct) from last two closes for the index."""
@@ -141,12 +131,6 @@ def fetch_index_day_snapshot(symbol):
     except Exception:
         return np.nan, np.nan, np.nan
 
-
-def fmt_pct(x):   return "—" if pd.isna(x) else f"{float(x):+.2%}"
-def fmt_price(x): return "—" if pd.isna(x) else f"{float(x):,.2f}"
-def fmt_abs(x):   return "—" if pd.isna(x) else f"{float(x):+,.2f}"
-
-
 def render_html(ctx):
     template = Template("""
 <!doctype html>
@@ -156,9 +140,9 @@ def render_html(ctx):
 <title>{{ title }}</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
-  :root { --fg:#111; --bg:#fff; --muted:#666; --gain:#0a7f3f; --loss:#a60023; --accent:#0b57d0; --pulse:#c7f0d8; }
+  :root { --fg:#111; --bg:#fff; --muted:#666; --gain:#0a7f3f; --loss:#a60023; --accent:#0b57d0; --pulse:#c7f0d8; --err:#ffe0e0; }
   @media (prefers-color-scheme: dark) {
-    :root { --fg:#eaeaea; --bg:#0b0b0b; --muted:#9aa0a6; --gain:#4cd26b; --loss:#ff6b81; --accent:#7aa2ff; --pulse:#123d27; }
+    :root { --fg:#eaeaea; --bg:#0b0b0b; --muted:#9aa0a6; --gain:#4cd26b; --loss:#ff6b81; --accent:#7aa2ff; --pulse:#123d27; --err:#4a1212; }
   }
   body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; margin: 24px; color: var(--fg); background: var(--bg); }
   h1 { margin: 0 0 8px; font-size: 1.75rem; }
@@ -177,6 +161,7 @@ def render_html(ctx):
   th { font-weight: 700; }
   .daywrap { display:flex; gap:6px; align-items:baseline; }
   .dim { color: var(--muted); font-size: .9em; }
+  .error { background: var(--err); padding: 6px 10px; border-radius: 8px; }
 </style>
 </head>
 <body>
@@ -205,7 +190,7 @@ def render_html(ctx):
       </div>
     </div>
     <div class="muted" style="margin-top:8px;">Auto-refreshing every 60 seconds. Day shows $ and %, Month/YTD show %.</div>
-    <div id="market_summary" style="margin-top:10px;"></div>
+    <div id="refresh_error" class="error" style="display:none; margin-top:8px;">Last update failed — retrying…</div>
   </div>
 
   <!-- Top combined table -->
@@ -270,8 +255,14 @@ def render_html(ctx):
     </table>
   </div>
 
+  <!-- Daily Market Summary -->
+  <div class="card">
+    <h2 style="margin:0 0 8px 0;">Daily Market Summary</h2>
+    <p id="ai_summary" class="muted">—</p>
+  </div>
+
   <footer class="muted">
-    Built by GitHub Actions with yfinance. Not investment advice. Data may be delayed or adjusted.
+    Built by GitHub Pages + yfinance. Not investment advice. Data may be delayed or adjusted.
   </footer>
 
 <script>
@@ -281,7 +272,7 @@ def render_html(ctx):
   function fmtPct(x){ return (x >= 0 ? "+" : "") + (x ?? 0).toFixed(2) + "%"; }
   function fmtAbs(x){ const v = (x ?? 0); return (v >= 0 ? "+" : "") + Math.abs(v).toFixed(2); }
   function pulse(el){ if(!el) return; el.classList.add("pulse"); setTimeout(()=>el.classList.remove("pulse"), 600); }
-  function setUpdatedNow(){
+  function setUpdatedNow(ok=true){
     const d = new Date();
     const hh = String(d.getHours()).padStart(2,"0");
     const mm = String(d.getMinutes()).padStart(2,"0");
@@ -289,6 +280,7 @@ def render_html(ctx):
     const el = document.getElementById("last_updated");
     el.textContent = `${hh}:${mm}:${ss}`;
     pulse(document.getElementById("banner"));
+    document.getElementById("refresh_error").style.display = ok ? "none" : "block";
   }
   function setMarketStatusFromState(state){
     let label = "Market Closed";
@@ -300,8 +292,7 @@ def render_html(ctx):
   function setMarketStatusFallback(){
     // Fallback: Mon–Fri, 8:30–15:00 CT = Open; 15:00–19:00 = After Hours
     const d = new Date();
-    const day = d.getDay(); // 0 Sun ... 6 Sat
-    if (day === 0 || day === 6) { setMarketStatusFromState("CLOSED"); return; }
+    const day = d.getDay(); if (day === 0 || day === 6) { setMarketStatusFromState("CLOSED"); return; }
     const mins = d.getHours()*60 + d.getMinutes();
     if (mins >= 8*60+30 && mins <= 15*60) setMarketStatusFromState("REGULAR");
     else if (mins > 15*60 && mins <= 19*60) setMarketStatusFromState("POST");
@@ -367,36 +358,85 @@ def render_html(ctx):
     }
   }
 
-  function composeSummary(idxQuotes, allItemQuotes){
+  function summarize(idxQuotes, itemQuotes){
     try{
       const dji = idxQuotes["^DJI"], gspc = idxQuotes["^GSPC"];
       const djiPct = dji?.regularMarketChangePercent ?? 0;
       const gspcPct = gspc?.regularMarketChangePercent ?? 0;
 
-      // Find leaders/laggards among the tracked set that have a change%
+      // check thematic ETFs if present
+      const qqq  = itemQuotes["QQQ"] || itemQuotes["QQQM"];
+      const smh  = itemQuotes["SMH"];
+      const arkk = itemQuotes["ARKK"];
+      const tlt  = itemQuotes["TLT"];
+      const spy  = itemQuotes["SPY"];
+
+      const parts = [];
+      const dir = gspcPct >= 0 ? "higher" : "lower";
+      parts.push(`U.S. equities are trading ${dir} so far — S&P 500 ${fmtPct(gspcPct)}, Dow ${fmtPct(djiPct)}.`);
+
+      const qqqp = qqq?.regularMarketChangePercent;
+      const spyp = spy?.regularMarketChangePercent;
+      if (qqqp != null && spyp != null) {
+        if (qqqp > spyp + 0.2) parts.push("Growth/tech is leading (QQQ).");
+        else if (spyp > qqqp + 0.2) parts.push("Large caps are outpacing growth (SPY > QQQ).");
+      }
+
+      const smhp = smh?.regularMarketChangePercent;
+      if (smhp != null) {
+        parts.push(`Semis ${smhp >= 0 ? "firm" : "soft"} (SMH ${fmtPct(smhp)}).`);
+      }
+
+      const arkkp = arkk?.regularMarketChangePercent;
+      if (arkkp != null) {
+        parts.push(`High-beta ${arkkp >= 0 ? "bid" : "pressure"} (ARKK ${fmtPct(arkkp)}).`);
+      }
+
+      const tltp = tlt?.regularMarketChangePercent;
+      if (tltp != null) {
+        parts.push(`Rates proxy TLT ${fmtPct(tltp)} ${tltp>0 ? "(yields down)" : "(yields up)"} .`);
+      }
+
+      // top movers among tracked
       const movers = [];
-      for (const [sym, q] of Object.entries(allItemQuotes)){
+      for (const [sym, q] of Object.entries(itemQuotes)){
         const p = q?.regularMarketChangePercent;
         if (p == null) continue;
         movers.push([sym, +p]);
       }
       movers.sort((a,b)=>b[1]-a[1]);
-      const up = movers.slice(0,3).map(([s,v])=>`${s} ${fmtPct(v)}`);
-      const dn = movers.slice(-3).reverse().map(([s,v])=>`${s} ${fmtPct(v)}`);
+      const up = movers.slice(0,3).map(([s,v])=>`${s} ${fmtPct(v)}`).join(", ");
+      const dn = movers.slice(-3).reverse().map(([s,v])=>`${s} ${fmtPct(v)}`).join(", ");
+      if (up) parts.push(`Leaders: ${up}.`);
+      if (dn) parts.push(`Laggards: ${dn}.`);
 
-      const dir = gspcPct >= 0 ? "higher" : "lower";
-      const txt = `Market ${dir} so far: S&P 500 ${fmtPct(gspcPct)}, Dow ${fmtPct(djiPct)}. Leaders: ${up.join(", ")}. Laggards: ${dn.join(", ")}.`;
-      const el = document.getElementById("market_summary");
-      if (el){ el.textContent = txt; }
-    }catch(e){ console.log("Summary compose failed:", e); }
+      const el = document.getElementById("ai_summary");
+      if (el) el.textContent = parts.join(" ");
+    }catch(e){
+      console.log("Summary failed:", e);
+    }
+  }
+
+  async function fetchJsonWithFallback(urls){
+    for (const url of urls){
+      try {
+        const r = await fetch(url, {cache:"no-store", mode:"cors"});
+        if (!r.ok) throw new Error("HTTP "+r.status);
+        return await r.json();
+      } catch(e) { /* try next */ }
+    }
+    throw new Error("All endpoints failed");
   }
 
   async function refreshIndicesAndStatus(){
+    const ts = Date.now();
+    const urls = [
+      "https://query2.finance.yahoo.com/v7/finance/quote?symbols=%5EDJI,%5EGSPC&_=" + ts,
+      "https://query1.finance.yahoo.com/v7/finance/quote?symbols=%5EDJI,%5EGSPC&_=" + ts
+    ];
     const idxMap = {};
-    const url = "https://query2.finance.yahoo.com/v7/finance/quote?symbols=%5EDJI,%5EGSPC&_=" + Date.now();
     try {
-      const r = await fetch(url, {cache:"no-store", mode:"cors"});
-      const j = await r.json();
+      const j = await fetchJsonWithFallback(urls);
       const res = (j && j.quoteResponse && j.quoteResponse.result) || [];
       for (const it of res) { if (it && it.symbol) idxMap[it.symbol] = it; }
 
@@ -431,40 +471,47 @@ def render_html(ctx):
       const anyState = (Object.values(idxMap).find(x => x && x.marketState)?.marketState) || null;
       if (anyState) setMarketStatusFromState(anyState); else setMarketStatusFallback();
 
+      return {ok:true, idxMap};
     } catch(e){
       console.log("Index/status refresh failed:", e);
       setMarketStatusFallback();
+      return {ok:false, idxMap:{}};
     }
-    return idxMap;
   }
 
   async function refreshTables(){
     const outMap = {};
-    if (!REFRESH_SYMBOLS || !REFRESH_SYMBOLS.length) return outMap;
+    if (!REFRESH_SYMBOLS || !REFRESH_SYMBOLS.length) return {ok:true, outMap};
 
     const size = 40;
+    let okAll = true;
     for (let i=0; i<REFRESH_SYMBOLS.length; i+=size) {
       const group = REFRESH_SYMBOLS.slice(i, i+size);
-      const url = "https://query2.finance.yahoo.com/v7/finance/quote?symbols=" +
-                  encodeURIComponent(group.join(",")) + "&_=" + Date.now();
+      const ts = Date.now();
+      const urls = [
+        "https://query2.finance.yahoo.com/v7/finance/quote?symbols=" + encodeURIComponent(group.join(",")) + "&_=" + ts,
+        "https://query1.finance.yahoo.com/v7/finance/quote?symbols=" + encodeURIComponent(group.join(",")) + "&_=" + ts
+      ];
       try {
-        const r = await fetch(url, {cache:"no-store", mode:"cors"});
-        const j = await r.json();
+        const j = await fetchJsonWithFallback(urls);
         const res = (j && j.quoteResponse && j.quoteResponse.result) || [];
         for (const it of res) {
           if (!it || !it.symbol) continue;
           outMap[it.symbol] = it;
           recomputeAndRender(it.symbol, it);
         }
-      } catch(e){ console.log("Table refresh failed:", e); }
+      } catch(e){
+        console.log("Table refresh failed for chunk:", group, e);
+        okAll = false;
+      }
     }
-    return outMap;
+    return {ok:okAll, outMap};
   }
 
   async function doRefresh(){
-    const [idxMap, itemMap] = await Promise.all([refreshIndicesAndStatus(), refreshTables()]);
-    composeSummary(idxMap, itemMap);
-    setUpdatedNow();
+    const [idxRes, tabRes] = await Promise.all([refreshIndicesAndStatus(), refreshTables()]);
+    summarize(idxRes.idxMap, tabRes.outMap);
+    setUpdatedNow(idxRes.ok && tabRes.ok);
   }
 
   // Auto-refresh every 60s + initial load
@@ -475,7 +522,6 @@ def render_html(ctx):
 </html>
     """.strip())
     return template.render(**ctx)
-
 
 def main():
     clean_output_dir()
@@ -526,22 +572,20 @@ def main():
     df_mike["__order"] = df_mike["Ticker"].map(order_map)
     df_mike = df_mike.sort_values("__order").drop(columns="__order")
 
-    # Prepare HTML rows including baselines (used by JS for live recompute)
     def rows_for_html(df_):
         out = []
         for _, r in df_.iterrows():
-            price = r["Price"]; d = r["Day"]; m = r["Month"]; y = r["YTD"]; da = r["DayAbs"]
             out.append({
                 "Ticker": r["Ticker"], "Name": r["Name"],
-                "Price": "—" if pd.isna(price) else f"{float(price):,.2f}",
-                "Day": "—" if pd.isna(d) else f"{float(d):+.2%}",
-                "DayAbs": "—" if pd.isna(da) else f"{float(da):+,.2f}",
-                "Month": "—" if pd.isna(m) else f"{float(m):+.2%}",
-                "YTD": "—" if pd.isna(y) else f"{float(y):+.2%}",
-                "Day_val": 0.0 if pd.isna(d) else float(d),
-                "DayAbs_val": 0.0 if pd.isna(da) else float(da),
-                "Month_val": 0.0 if pd.isna(m) else float(m),
-                "YTD_val": 0.0 if pd.isna(y) else float(y),
+                "Price": "—" if pd.isna(r["Price"]) else f"{float(r['Price']):,.2f}",
+                "Day": "—" if pd.isna(r["Day"]) else f"{float(r['Day']):+.2%}",
+                "DayAbs": "—" if pd.isna(r["DayAbs"]) else f"{float(r['DayAbs']):+,.2f}",
+                "Month": "—" if pd.isna(r["Month"]) else f"{float(r['Month']):+.2%}",
+                "YTD": "—" if pd.isna(r["YTD"]) else f"{float(r['YTD']):+.2%}",
+                "Day_val": 0.0 if pd.isna(r["Day"]) else float(r["Day"]),
+                "DayAbs_val": 0.0 if pd.isna(r["DayAbs"]) else float(r["DayAbs"]),
+                "Month_val": 0.0 if pd.isna(r["Month"]) else float(r["Month"]),
+                "YTD_val": 0.0 if pd.isna(r["YTD"]) else float(r["YTD"]),
                 "PrevCloseRaw": "" if pd.isna(r["PrevClose"]) else float(r["PrevClose"]),
                 "MonthBaseRaw": "" if pd.isna(r["MonthBase"]) else float(r["MonthBase"]),
                 "YtdBaseRaw": "" if pd.isna(r["YtdBase"]) else float(r["YtdBase"]),
@@ -551,8 +595,10 @@ def main():
     top_rows  = rows_for_html(df_top)
     mike_rows = rows_for_html(df_mike)
 
-    # Symbols to refresh on page (Top10 ∪ Mike)
+    # Symbols to refresh on page (Top10 ∪ Mike). If empty, still refresh Mike's list to enable summary.
     refresh_symbols = sorted(set(df_top["Ticker"].tolist()) | set(df_mike["Ticker"].tolist()))
+    if not refresh_symbols:
+        refresh_symbols = MIKE_TICKERS
 
     # Seed index banner from last two closes
     dji_last, dji_chg_abs, dji_chg_pct = fetch_index_day_snapshot("^DJI")
@@ -581,8 +627,7 @@ def main():
     with open(os.path.join(OUT_DIR, "index.html"), "w", encoding="utf-8") as f:
         f.write(html)
 
-    print("✅ Built page with reliable live auto-refresh, market status, and daily summary. Missing tickers skipped.")
-    
+    print("✅ Built page with reliable live auto-refresh, bottom summary, and visible error state. Missing tickers skipped.")
 
 if __name__ == "__main__":
     try:

@@ -205,6 +205,7 @@ def render_html(ctx):
       </div>
     </div>
     <div class="muted" style="margin-top:8px;">Auto-refreshing every 60 seconds. Day shows $ and %, Month/YTD show %.</div>
+    <div id="market_summary" style="margin-top:10px;"></div>
   </div>
 
   <!-- Top combined table -->
@@ -297,12 +298,11 @@ def render_html(ctx):
     document.getElementById("market_status").textContent = label;
   }
   function setMarketStatusFallback(){
-    // Simple fallback: Mon-Fri, 8:30–15:00 CT treated as "Open", 15:00–19:00 "After Hours"
+    // Fallback: Mon–Fri, 8:30–15:00 CT = Open; 15:00–19:00 = After Hours
     const d = new Date();
     const day = d.getDay(); // 0 Sun ... 6 Sat
     if (day === 0 || day === 6) { setMarketStatusFromState("CLOSED"); return; }
-    const hh = d.getHours(), mm = d.getMinutes();
-    const mins = hh*60 + mm; // local (assumes CT browsing)
+    const mins = d.getHours()*60 + d.getMinutes();
     if (mins >= 8*60+30 && mins <= 15*60) setMarketStatusFromState("REGULAR");
     else if (mins > 15*60 && mins <= 19*60) setMarketStatusFromState("POST");
     else setMarketStatusFromState("CLOSED");
@@ -316,9 +316,9 @@ def render_html(ctx):
     let prev  = parseFloat(row.getAttribute("data-prev"));
     const mbase = parseFloat(row.getAttribute("data-mbase"));
     const ybase = parseFloat(row.getAttribute("data-ybase"));
-    const price = quote.regularMarketPrice ?? quote.price ?? NaN;
+    const price = quote?.regularMarketPrice ?? quote?.price ?? NaN;
 
-    if (isNaN(prev) && quote.regularMarketPreviousClose != null) prev = +quote.regularMarketPreviousClose;
+    if (isNaN(prev) && quote?.regularMarketPreviousClose != null) prev = +quote.regularMarketPreviousClose;
 
     // Price
     if (!isNaN(price)) {
@@ -332,8 +332,8 @@ def render_html(ctx):
       dayAbs = price - prev;
       dayPct = (price/prev - 1) * 100.0;
     } else {
-      if (quote.regularMarketChange != null) dayAbs = +quote.regularMarketChange;
-      if (quote.regularMarketChangePercent != null) dayPct = +quote.regularMarketChangePercent;
+      if (quote?.regularMarketChange != null) dayAbs = +quote.regularMarketChange;
+      if (quote?.regularMarketChangePercent != null) dayPct = +quote.regularMarketChangePercent;
     }
     const daEl = document.getElementById("da_"+sym);
     const dpEl = document.getElementById("dp_"+sym);
@@ -367,15 +367,40 @@ def render_html(ctx):
     }
   }
 
+  function composeSummary(idxQuotes, allItemQuotes){
+    try{
+      const dji = idxQuotes["^DJI"], gspc = idxQuotes["^GSPC"];
+      const djiPct = dji?.regularMarketChangePercent ?? 0;
+      const gspcPct = gspc?.regularMarketChangePercent ?? 0;
+
+      // Find leaders/laggards among the tracked set that have a change%
+      const movers = [];
+      for (const [sym, q] of Object.entries(allItemQuotes)){
+        const p = q?.regularMarketChangePercent;
+        if (p == null) continue;
+        movers.push([sym, +p]);
+      }
+      movers.sort((a,b)=>b[1]-a[1]);
+      const up = movers.slice(0,3).map(([s,v])=>`${s} ${fmtPct(v)}`);
+      const dn = movers.slice(-3).reverse().map(([s,v])=>`${s} ${fmtPct(v)}`);
+
+      const dir = gspcPct >= 0 ? "higher" : "lower";
+      const txt = `Market ${dir} so far: S&P 500 ${fmtPct(gspcPct)}, Dow ${fmtPct(djiPct)}. Leaders: ${up.join(", ")}. Laggards: ${dn.join(", ")}.`;
+      const el = document.getElementById("market_summary");
+      if (el){ el.textContent = txt; }
+    }catch(e){ console.log("Summary compose failed:", e); }
+  }
+
   async function refreshIndicesAndStatus(){
-    const url = "https://query1.finance.yahoo.com/v7/finance/quote?symbols=%5EDJI,%5EGSPC";
+    const idxMap = {};
+    const url = "https://query2.finance.yahoo.com/v7/finance/quote?symbols=%5EDJI,%5EGSPC&_=" + Date.now();
     try {
-      const r = await fetch(url, {cache:"no-store"});
+      const r = await fetch(url, {cache:"no-store", mode:"cors"});
       const j = await r.json();
       const res = (j && j.quoteResponse && j.quoteResponse.result) || [];
-      const by = {}; for (const it of res) by[it.symbol] = it;
+      for (const it of res) { if (it && it.symbol) idxMap[it.symbol] = it; }
 
-      const dji = by["^DJI"];
+      const dji = idxMap["^DJI"];
       if (dji) {
         const price = dji.regularMarketPrice ?? 0;
         const chg = dji.regularMarketChange ?? 0;
@@ -389,7 +414,7 @@ def render_html(ctx):
         if (pPct){ pPct.textContent = fmtPct(pct); pPct.className = cls; pulse(pPct); }
       }
 
-      const gspc = by["^GSPC"];
+      const gspc = idxMap["^GSPC"];
       if (gspc) {
         const price = gspc.regularMarketPrice ?? 0;
         const chg = gspc.regularMarketChange ?? 0;
@@ -403,36 +428,42 @@ def render_html(ctx):
         if (pPct){ pPct.textContent = fmtPct(pct); pPct.className = cls; pulse(pPct); }
       }
 
-      // Market status: try any returned quote's marketState; else fallback clock
-      const anyState = (res.find(x => x && x.marketState)?.marketState) || null;
-      if (anyState) setMarketStatusFromState(anyState);
-      else setMarketStatusFallback();
+      const anyState = (Object.values(idxMap).find(x => x && x.marketState)?.marketState) || null;
+      if (anyState) setMarketStatusFromState(anyState); else setMarketStatusFallback();
+
     } catch(e){
       console.log("Index/status refresh failed:", e);
       setMarketStatusFallback();
     }
+    return idxMap;
   }
 
   async function refreshTables(){
-    if (!REFRESH_SYMBOLS.length) return;
+    const outMap = {};
+    if (!REFRESH_SYMBOLS || !REFRESH_SYMBOLS.length) return outMap;
+
     const size = 40;
     for (let i=0; i<REFRESH_SYMBOLS.length; i+=size) {
       const group = REFRESH_SYMBOLS.slice(i, i+size);
-      const url = "https://query1.finance.yahoo.com/v7/finance/quote?symbols=" + encodeURIComponent(group.join(","));
+      const url = "https://query2.finance.yahoo.com/v7/finance/quote?symbols=" +
+                  encodeURIComponent(group.join(",")) + "&_=" + Date.now();
       try {
-        const r = await fetch(url, {cache:"no-store"});
+        const r = await fetch(url, {cache:"no-store", mode:"cors"});
         const j = await r.json();
         const res = (j && j.quoteResponse && j.quoteResponse.result) || [];
         for (const it of res) {
           if (!it || !it.symbol) continue;
+          outMap[it.symbol] = it;
           recomputeAndRender(it.symbol, it);
         }
       } catch(e){ console.log("Table refresh failed:", e); }
     }
+    return outMap;
   }
 
   async function doRefresh(){
-    await Promise.all([refreshIndicesAndStatus(), refreshTables()]);
+    const [idxMap, itemMap] = await Promise.all([refreshIndicesAndStatus(), refreshTables()]);
+    composeSummary(idxMap, itemMap);
     setUpdatedNow();
   }
 
@@ -550,7 +581,7 @@ def main():
     with open(os.path.join(OUT_DIR, "index.html"), "w", encoding="utf-8") as f:
         f.write(html)
 
-    print("✅ Built page with Day $ + %, live auto-refresh, and robust market status.")
+    print("✅ Built page with reliable live auto-refresh, market status, and daily summary. Missing tickers skipped.")
     
 
 if __name__ == "__main__":

@@ -18,7 +18,7 @@ TITLE = "Top 10 Stocks & ETFs — Price · Day · Month · YTD"
 TZ = "America/Chicago"
 
 # >>>>>>>>>>>>>>>> SET THIS TO YOUR WORKER URL (no trailing slash) <<<<<<<<<<<<<<
-WORKER_BASE = "https://YOUR-WORKER-NAME.YOUR-SUBDOMAIN.workers.dev"
+WORKER_BASE = "https://polished-moon-50d8.architek-eth.workers.dev"
 
 MIKE_TICKERS = ["VOO","VOOG","VUG","VDIGX","QQQM","AAPL","NVDA","IVV","IWF","SE","FBTC","VV","FXAIZ","AMZN","CLX","CRM","GBTC","ALRM"]
 # ---------------------------------------------------------------

@@ -1,10 +1,6 @@
-import os
-import sys
-import shutil
-import json
+import os, sys, shutil, json
 from datetime import datetime
-import pandas as pd
-import numpy as np
+import pandas as pd, numpy as np
 import yfinance as yf
 from jinja2 import Template
 
@@ -15,19 +11,17 @@ OUT_DIR  = os.path.join(ROOT, "docs")
 STOCKS_FILE = os.path.join(DATA_DIR, "tickers_stocks.txt")
 ETFS_FILE   = os.path.join(DATA_DIR, "tickers_etfs.txt")
 
-HISTORY_PERIOD = "1y"                 # enough for YTD
-LOOKBACKS = {"day": 1, "month": 21}   # trading days for "month"
-RANK_HORIZON = "month"                # "day" | "month" | "ytd"
+HISTORY_PERIOD = "1y"                 # enough for YTD baselines
+LOOKBACKS = {"day": 1, "month": 21}
 TOP_N = 10
 TITLE = "Top 10 Stocks & ETFs — Price · Day · Month · YTD"
 TZ = "America/Chicago"
 
-# Mike's watchlist (kept as provided; missing tickers are skipped gracefully)
-MIKE_TICKERS = [
-    "VOO","VOOG","VUG","VDIGX","QQQM","AAPL","NVDA","IVV","IWF","SE",
-    "FBTC","VV","FXAIZ","AMZN","CLX","CRM","GBTC","ALRM"
-]
-# ----------------------------
+# >>>>>>>>>>>>>>>> SET THIS TO YOUR WORKER URL (no trailing slash) <<<<<<<<<<<<<<
+WORKER_BASE = "https://broken-night-0891.architek-eth.workers.dev/"
+
+MIKE_TICKERS = ["VOO","VOOG","VUG","VDIGX","QQQM","AAPL","NVDA","IVV","IWF","SE","FBTC","VV","FXAIZ","AMZN","CLX","CRM","GBTC","ALRM"]
+# ---------------------------------------------------------------
 
 def clean_output_dir():
     if os.path.isdir(OUT_DIR):
@@ -36,78 +30,59 @@ def clean_output_dir():
 
 def read_tickers(path, default=None):
     default = default or []
-    if not os.path.exists(path):
-        return default
+    if not os.path.exists(path): return default
     with open(path, "r", encoding="utf-8") as f:
-        lines = [x.strip() for x in f if x.strip() and not x.startswith("#")]
-    return lines
+        return [x.strip() for x in f if x.strip() and not x.startswith("#")]
 
 def _to_scalar(x):
-    try:
-        return float(x.item()) if hasattr(x, "item") else float(x)
-    except Exception:
-        return float("nan")
+    try: return float(x.item()) if hasattr(x, "item") else float(x)
+    except Exception: return float("nan")
 
 def fetch_histories(tickers):
-    """Return dict[ticker] -> Series of Close prices. Skip tickers with no data."""
-    if not tickers:
-        return {}
-    df = yf.download(
-        tickers=tickers, period=HISTORY_PERIOD, interval="1d",
-        auto_adjust=False, progress=False, group_by="ticker", threads=True
-    )
+    if not tickers: return {}
+    df = yf.download(tickers=tickers, period=HISTORY_PERIOD, interval="1d",
+                     auto_adjust=False, progress=False, group_by="ticker", threads=True)
     out = {}
     if isinstance(df.columns, pd.MultiIndex):
         for t in tickers:
             try:
                 s = df[(t, "Close")].dropna()
-                if not s.empty:
-                    out[t] = s
+                if not s.empty: out[t] = s
             except KeyError:
                 pass
     else:
         try:
             s = df["Close"].dropna()
-            if not s.empty:
-                out[tickers[0]] = s
+            if not s.empty: out[tickers[0]] = s
         except Exception:
             pass
     return out
 
 def price_last(s):
     s = s.dropna()
-    if len(s) == 0:
-        return np.nan
-    return _to_scalar(s.iloc[-1])
+    return np.nan if len(s)==0 else _to_scalar(s.iloc[-1])
 
 def prev_close(s):
     s = s.dropna()
-    if len(s) < 2:
-        return np.nan
-    return _to_scalar(s.iloc[-2])
+    return np.nan if len(s)<2 else _to_scalar(s.iloc[-2])
 
 def month_base(s):
     s = s.dropna()
-    if len(s) <= LOOKBACKS["month"]:
-        return np.nan
-    return _to_scalar(s.iloc[-(LOOKBACKS["month"] + 1)])
+    return np.nan if len(s)<=LOOKBACKS["month"] else _to_scalar(s.iloc[-(LOOKBACKS["month"]+1)])
 
 def ytd_base(s):
     s = s.dropna()
-    if s.empty:
-        return np.nan
+    if s.empty: return np.nan
     yr = s.index[-1].year
-    this_year = s[s.index.year == yr]
-    if this_year.empty:
-        return np.nan
-    return _to_scalar(this_year.iloc[0])
+    this_year = s[s.index.year==yr]
+    return np.nan if this_year.empty else _to_scalar(this_year.iloc[0])
 
 def names_for_tickers(tickers):
     names = {}
     try:
         info = yf.Tickers(" ".join(tickers))
     except Exception:
-        return {t: t for t in tickers}
+        return {t:t for t in tickers}
     for t in tickers:
         try:
             nm = info.tickers[t].info.get("shortName") or info.tickers[t].info.get("longName")
@@ -115,21 +90,6 @@ def names_for_tickers(tickers):
         except Exception:
             names[t] = t
     return names
-
-def fetch_index_day_snapshot(symbol):
-    """Return (last_price, day_change_abs, day_change_pct) from last two closes for the index."""
-    try:
-        hist = yf.download(tickers=[symbol], period="5d", interval="1d", progress=False, auto_adjust=False)
-        s = hist["Close"].dropna()
-        if len(s) < 2:
-            return np.nan, np.nan, np.nan
-        last = _to_scalar(s.iloc[-1])
-        prev = _to_scalar(s.iloc[-2])
-        chg = last - prev
-        chg_pct = (chg / prev) if prev != 0 else np.nan
-        return last, chg, chg_pct
-    except Exception:
-        return np.nan, np.nan, np.nan
 
 def render_html(ctx):
     template = Template("""
@@ -151,8 +111,7 @@ def render_html(ctx):
   .row { display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
   .badge { padding: 8px 12px; border: 1px solid rgba(127,127,127,0.3); border-radius: 10px; display:flex; gap:10px; align-items:baseline; }
   .num { font-variant-numeric: tabular-nums; white-space: nowrap; }
-  .gain { color: var(--gain); }
-  .loss { color: var(--loss); }
+  .gain { color: var(--gain); } .loss { color: var(--loss); }
   .status { font-weight: 700; }
   .pulse { animation: pulse-bg 0.6s ease; }
   @keyframes pulse-bg { 0% { background: var(--pulse); } 100% { background: transparent; } }
@@ -167,22 +126,21 @@ def render_html(ctx):
 <body>
   <h1>{{ title }}</h1>
 
-  <!-- Market status + indices -->
   <div class="card" id="banner">
     <div class="row" style="justify-content: space-between;">
       <div class="row">
         <div class="badge"><span class="status" id="market_status">Market …</span></div>
         <div class="badge">
           <div><strong>Dow Jones (DJIA)</strong></div>
-          <div class="num">$<span id="dji_price">{{ dji_price }}</span></div>
-          <div class="num"><span id="dji_chg" class="{{ 'gain' if dji_chg_val >=0 else 'loss' }}">{{ dji_chg }}</span></div>
-          <div class="num"><span id="dji_chg_pct" class="{{ 'gain' if dji_chg_val >=0 else 'loss' }}">{{ dji_chg_pct }}</span></div>
+          <div class="num">$<span id="dji_price">—</span></div>
+          <div class="num"><span id="dji_chg">—</span></div>
+          <div class="num"><span id="dji_chg_pct">—</span></div>
         </div>
         <div class="badge">
           <div><strong>S&amp;P 500</strong></div>
-          <div class="num">$<span id="gspc_price">{{ gspc_price }}</span></div>
-          <div class="num"><span id="gspc_chg" class="{{ 'gain' if gspc_chg_val >=0 else 'loss' }}">{{ gspc_chg }}</span></div>
-          <div class="num"><span id="gspc_chg_pct" class="{{ 'gain' if gspc_chg_val >=0 else 'loss' }}">{{ gspc_chg_pct }}</span></div>
+          <div class="num">$<span id="gspc_price">—</span></div>
+          <div class="num"><span id="gspc_chg">—</span></div>
+          <div class="num"><span id="gspc_chg_pct">—</span></div>
         </div>
       </div>
       <div class="row">
@@ -193,7 +151,6 @@ def render_html(ctx):
     <div id="refresh_error" class="error" style="display:none; margin-top:8px;">Last update failed — retrying…</div>
   </div>
 
-  <!-- Top combined table -->
   <div class="card">
     <h2 style="margin:0 0 8px 0;">Combined Top {{ top_n }} (Stocks + ETFs)</h2>
     <table>
@@ -210,21 +167,15 @@ def render_html(ctx):
           <td><a href="https://finance.yahoo.com/quote/{{ r['Ticker'] }}/" target="_blank" rel="noopener">{{ r['Ticker'] }}</a></td>
           <td>{{ r['Name'] }}</td>
           <td class="num">$<span id="p_{{ r['Ticker'] }}">{{ r['Price'] }}</span></td>
-          <td class="num">
-            <span class="daywrap">
-              <span id="da_{{ r['Ticker'] }}" class="{{ 'gain' if r['DayAbs_val'] >= 0 else 'loss' }}">{{ r['DayAbs'] }}</span>
-              <span id="dp_{{ r['Ticker'] }}" class="dim {{ 'gain' if r['Day_val'] >= 0 else 'loss' }}">({{ r['Day'] }})</span>
-            </span>
-          </td>
-          <td class="num"><span id="m_{{ r['Ticker'] }}" class="{{ 'gain' if r['Month_val'] >= 0 else 'loss' }}">{{ r['Month'] }}</span></td>
-          <td class="num"><span id="y_{{ r['Ticker'] }}" class="{{ 'gain' if r['YTD_val'] >= 0 else 'loss' }}">{{ r['YTD'] }}</span></td>
+          <td class="num"><span class="daywrap"><span id="da_{{ r['Ticker'] }}">{{ r['DayAbs'] }}</span> <span id="dp_{{ r['Ticker'] }}" class="dim">({{ r['Day'] }})</span></span></td>
+          <td class="num"><span id="m_{{ r['Ticker'] }}">{{ r['Month'] }}</span></td>
+          <td class="num"><span id="y_{{ r['Ticker'] }}">{{ r['YTD'] }}</span></td>
         </tr>
         {% endfor %}
       </tbody>
     </table>
   </div>
 
-  <!-- Mike's list -->
   <div class="card">
     <h2 style="margin:0 0 8px 0;">Mike's Stocks & ETFs</h2>
     <table>
@@ -241,487 +192,199 @@ def render_html(ctx):
           <td><a href="https://finance.yahoo.com/quote/{{ r['Ticker'] }}/" target="_blank" rel="noopener">{{ r['Ticker'] }}</a></td>
           <td>{{ r['Name'] }}</td>
           <td class="num">$<span id="p_{{ r['Ticker'] }}">{{ r['Price'] }}</span></td>
-          <td class="num">
-            <span class="daywrap">
-              <span id="da_{{ r['Ticker'] }}" class="{{ 'gain' if r['DayAbs_val'] >= 0 else 'loss' }}">{{ r['DayAbs'] }}</span>
-              <span id="dp_{{ r['Ticker'] }}" class="dim {{ 'gain' if r['Day_val'] >= 0 else 'loss' }}">({{ r['Day'] }})</span>
-            </span>
-          </td>
-          <td class="num"><span id="m_{{ r['Ticker'] }}" class="{{ 'gain' if r['Month_val'] >= 0 else 'loss' }}">{{ r['Month'] }}</span></td>
-          <td class="num"><span id="y_{{ r['Ticker'] }}" class="{{ 'gain' if r['YTD_val'] >= 0 else 'loss' }}">{{ r['YTD'] }}</span></td>
+          <td class="num"><span class="daywrap"><span id="da_{{ r['Ticker'] }}">{{ r['DayAbs'] }}</span> <span id="dp_{{ r['Ticker'] }}" class="dim">({{ r['Day'] }})</span></span></td>
+          <td class="num"><span id="m_{{ r['Ticker'] }}">{{ r['Month'] }}</span></td>
+          <td class="num"><span id="y_{{ r['Ticker'] }}">{{ r['YTD'] }}</span></td>
         </tr>
         {% endfor %}
       </tbody>
     </table>
   </div>
 
-  <!-- Daily Market Summary -->
   <div class="card">
     <h2 style="margin:0 0 8px 0;">Daily Market Summary</h2>
     <p id="ai_summary" class="muted">—</p>
   </div>
 
-  <footer class="muted">
-    Built by GitHub Pages + yfinance. Not investment advice. Data may be delayed or adjusted.
-  </footer>
+  <footer class="muted">Built on GitHub Pages. Not investment advice. Data may be delayed.</footer>
 
 <script>
-  // ---------- symbols to refresh (server injects this) ----------
+  // ======== CONFIG ========
+  const WORKER_BASE = "{{ worker_base }}";
   const REFRESH_SYMBOLS = {{ refresh_symbols_json | safe }};
 
-  // ---------- NEWS SOURCES (add/remove if you like) ----------
-  // We fetch XML RSS and parse it client-side, with a CORS-safe proxy fallback.
-  const NEWS_SOURCES = [
-    // Market-moving “fast” headlines
-    "https://feeds.bloomberg.com/markets/news.rss",        // Bloomberg Markets RSS
-    "https://www.nasdaq.com/feed/rssoutbound?category=Markets", // Nasdaq Markets RSS
-    // Policy / macro releases
-    "https://www.federalreserve.gov/feeds/press_all.xml",  // Fed press (all)
-    "https://www.bls.gov/feed/bls_latest.rss"              // BLS latest
-  ];
-
-  // ---------- general utils ----------
+  // ======== UTIL ========
+  const $ = (id) => document.getElementById(id);
   function fmtPrice(x){ return (x ?? 0).toFixed(2); }
   function fmtPct(x){ return (x >= 0 ? "+" : "") + (x ?? 0).toFixed(2) + "%"; }
   function fmtAbs(x){ const v = (x ?? 0); return (v >= 0 ? "+" : "") + Math.abs(v).toFixed(2); }
   function pulse(el){ if(!el) return; el.classList.add("pulse"); setTimeout(()=>el.classList.remove("pulse"), 600); }
-  function showError(show){ const n=document.getElementById("refresh_error"); if(n) n.style.display = show ? "block" : "none"; }
+  function showError(show){ const n=$("refresh_error"); if(n) n.style.display = show ? "block" : "none"; }
   function setUpdatedNow(ok=true){
-    const d = new Date();
-    const hh = String(d.getHours()).padStart(2,"0");
-    const mm = String(d.getMinutes()).padStart(2,"0");
-    const ss = String(d.getSeconds()).padStart(2,"0");
-    document.getElementById("last_updated").textContent = `${hh}:${mm}:${ss}`;
-    pulse(document.getElementById("banner"));
-    showError(!ok);
+    const d = new Date(), hh=String(d.getHours()).padStart(2,"0"), mm=String(d.getMinutes()).padStart(2,"0"), ss=String(d.getSeconds()).padStart(2,"0");
+    $("last_updated").textContent = `${hh}:${mm}:${ss}`; pulse($("banner")); showError(!ok);
   }
   function setMarketStatusFromState(state){
     let label = "Market Closed";
     if (state === "REGULAR") label = "Market Open";
     else if (state === "PRE") label = "Pre-Market";
     else if (state === "POST") label = "After Hours";
-    document.getElementById("market_status").textContent = label;
+    $("market_status").textContent = label;
   }
   function setMarketStatusFallback(){
-    const d = new Date(), day = d.getDay();
-    if (day === 0 || day === 6) { setMarketStatusFromState("CLOSED"); return; }
+    const d = new Date(), day=d.getDay();
+    if (day===0 || day===6){ setMarketStatusFromState("CLOSED"); return; }
     const mins = d.getHours()*60 + d.getMinutes();
     if (mins >= 8*60+30 && mins <= 15*60) setMarketStatusFromState("REGULAR");
     else if (mins > 15*60 && mins <= 19*60) setMarketStatusFromState("POST");
     else setMarketStatusFromState("CLOSED");
   }
 
-  // ---------- CORS-safe fetchers ----------
-  async function fetchJsonSmart(url){
-    try{
-      const r = await fetch(url, {cache:"no-store", mode:"cors"});
-      if (!r.ok) throw new Error("HTTP "+r.status);
-      return await r.json();
-    }catch(e1){
-      // r.jina.ai proxies the same URL with permissive CORS; returns text
-      const proxied = "https://r.jina.ai/http/" + url.replace(/^https?:\/\//, "");
-      const r = await fetch(proxied, {cache:"no-store"});
-      if (!r.ok) throw new Error("HTTP "+r.status);
-      return JSON.parse(await r.text());
-    }
-  }
-  async function fetchXmlSmart(url){
-    try{
-      const r = await fetch(url, {cache:"no-store", mode:"cors"});
-      if (!r.ok) throw new Error("HTTP "+r.status);
-      return (new window.DOMParser()).parseFromString(await r.text(), "text/xml");
-    }catch(e1){
-      const proxied = "https://r.jina.ai/http/" + url.replace(/^https?:\/\//, "");
-      const r = await fetch(proxied, {cache:"no-store"});
-      if (!r.ok) throw new Error("HTTP "+r.status);
-      return (new window.DOMParser()).parseFromString(await r.text(), "text/xml");
-    }
+  // ======== RENDER ========
+  function renderIndex(prefix, it){
+    if (!it) return;
+    const price = it.regularMarketPrice ?? 0;
+    const chg = it.regularMarketChange ?? 0;
+    const pct = it.regularMarketChangePercent ?? 0;
+    $(prefix+"_price").textContent = fmtPrice(price);
+    $(prefix+"_chg").textContent = (chg>=0?"+":"") + chg.toFixed(2);
+    $(prefix+"_chg_pct").textContent = fmtPct(pct);
+    [$(prefix+"_price"), $(prefix+"_chg"), $(prefix+"_chg_pct")].forEach(pulse);
   }
 
-  // ---------- Prices & indices ----------
   function recomputeAndRender(sym, quote){
-    const row = document.querySelector(`tr[data-symbol="${sym}"]`);
-    if (!row) return;
-
-    // baselines from static build
+    const row = document.querySelector(`tr[data-symbol="${sym}"]`); if (!row) return;
     let prev  = parseFloat(row.getAttribute("data-prev"));
     const mbase = parseFloat(row.getAttribute("data-mbase"));
     const ybase = parseFloat(row.getAttribute("data-ybase"));
-    const price = quote?.regularMarketPrice ?? quote?.price ?? NaN;
+    const price = quote?.regularMarketPrice ?? NaN;
     if (isNaN(prev) && quote?.regularMarketPreviousClose != null) prev = +quote.regularMarketPreviousClose;
 
-    // price
-    if (!isNaN(price)) { const pEl = document.getElementById("p_"+sym); if (pEl){ pEl.textContent = fmtPrice(price); pulse(pEl); } }
+    if (!isNaN(price)) { const pEl = $("p_"+sym); if (pEl){ pEl.textContent = fmtPrice(price); pulse(pEl); } }
 
-    // day: $ and %
-    let dayAbs = null, dayPct = null;
-    if (!isNaN(prev) && prev !== 0 && !isNaN(price)) { dayAbs = price - prev; dayPct = (price/prev - 1) * 100.0; }
-    else { if (quote?.regularMarketChange != null) dayAbs = +quote.regularMarketChange; if (quote?.regularMarketChangePercent != null) dayPct = +quote.regularMarketChangePercent; }
+    let dayAbs=null, dayPct=null;
+    if (!isNaN(prev) && prev!==0 && !isNaN(price)) { dayAbs = price - prev; dayPct = (price/prev - 1)*100.0; }
+    else { if (quote?.regularMarketChange!=null) dayAbs=+quote.regularMarketChange; if (quote?.regularMarketChangePercent!=null) dayPct=+quote.regularMarketChangePercent; }
 
-    const daEl = document.getElementById("da_"+sym), dpEl = document.getElementById("dp_"+sym);
-    if (daEl && dayAbs != null) { daEl.textContent = fmtAbs(dayAbs); daEl.className = (dayAbs >= 0 ? "gain" : "loss"); pulse(daEl); }
-    if (dpEl && dayPct != null) { dpEl.textContent = "(" + fmtPct(dayPct) + ")"; dpEl.className = "dim " + (dayPct >= 0 ? "gain" : "loss"); pulse(dpEl); }
+    const daEl=$("da_"+sym), dpEl=$("dp_"+sym);
+    if (daEl && dayAbs!=null){ daEl.textContent = fmtAbs(dayAbs); pulse(daEl); }
+    if (dpEl && dayPct!=null){ dpEl.textContent = "(" + fmtPct(dayPct) + ")"; pulse(dpEl); }
 
-    // month %
-    const mEl = document.getElementById("m_"+sym);
-    if (mEl && !isNaN(mbase) && mbase !== 0 && !isNaN(price)) { const mPct = (price/mbase - 1) * 100.0; mEl.textContent = fmtPct(mPct); mEl.className = mPct >= 0 ? "gain" : "loss"; pulse(mEl); }
-
-    // ytd %
-    const yEl = document.getElementById("y_"+sym);
-    if (yEl && !isNaN(ybase) && ybase !== 0 && !isNaN(price)) { const yPct = (price/ybase - 1) * 100.0; yEl.textContent = fmtPct(yPct); yEl.className = yPct >= 0 ? "gain" : "loss"; pulse(yEl); }
+    const mEl=$("m_"+sym);
+    if (mEl && !isNaN(mbase) && mbase!==0 && !isNaN(price)){ const mPct=(price/mbase-1)*100.0; mEl.textContent=fmtPct(mPct); pulse(mEl); }
+    const yEl=$("y_"+sym);
+    if (yEl && !isNaN(ybase) && ybase!==0 && !isNaN(price)){ const yPct=(price/ybase-1)*100.0; yEl.textContent=fmtPct(yPct); pulse(yEl); }
   }
 
-  async function refreshIndicesAndStatus(){
-    const ts = Date.now();
-    const url = "https://query2.finance.yahoo.com/v7/finance/quote?symbols=%5EDJI,%5EGSPC&_=" + ts;
-    try {
-      const j = await fetchJsonSmart(url);
-      const res = (j && j.quoteResponse && j.quoteResponse.result) || [];
-      const idxMap = {}; for (const it of res) { if (it && it.symbol) idxMap[it.symbol] = it; }
+  // ======== QUOTES ========
+  async function quotes(symbols){
+    const url = `${WORKER_BASE}/quote?symbols=${encodeURIComponent(symbols.join(","))}`;
+    const r = await fetch(url, {cache:"no-store"}); if (!r.ok) throw new Error("quotes "+r.status);
+    const j = await r.json();
+    const res = (j && j.quoteResponse && j.quoteResponse.result) || [];
+    const map = {}; res.forEach(it => { if (it?.symbol) map[it.symbol] = it; });
+    return map;
+  }
 
-      function upd(idPrefix, it){
-        if (!it) return;
-        const price = it.regularMarketPrice ?? 0, chg = it.regularMarketChange ?? 0, pct = it.regularMarketChangePercent ?? 0;
-        const cls = chg >= 0 ? "gain" : "loss";
-        const pEl = document.getElementById(idPrefix+"_price");
-        const aEl = document.getElementById(idPrefix+"_chg");
-        const pPct = document.getElementById(idPrefix+"_chg_pct");
-        if (pEl){ pEl.textContent = fmtPrice(price); pulse(pEl); }
-        if (aEl){ aEl.textContent = (chg>=0?"+":"") + chg.toFixed(2); aEl.className = cls; pulse(aEl); }
-        if (pPct){ pPct.textContent = fmtPct(pct); pPct.className = cls; pulse(pPct); }
-      }
-      upd("dji", idxMap["^DJI"]);
-      upd("gspc", idxMap["^GSPC"]);
-
-      const anyState = (Object.values(idxMap).find(x => x && x.marketState)?.marketState) || null;
-      if (anyState) setMarketStatusFromState(anyState); else setMarketStatusFallback();
-
-      return {ok:true, idxMap};
-    } catch(e){
-      setMarketStatusFallback();
-      return {ok:false, idxMap:{}};
-    }
+  async function refreshIndices(){
+    const m = await quotes(["^DJI","^GSPC"]);
+    renderIndex("dji", m["^DJI"]); renderIndex("gspc", m["^GSPC"]);
+    const state = (Object.values(m).find(x => x?.marketState)?.marketState) || null;
+    if (state) setMarketStatusFromState(state); else setMarketStatusFallback();
+    return m;
   }
 
   async function refreshTables(){
-    const outMap = {};
-    if (!REFRESH_SYMBOLS || !REFRESH_SYMBOLS.length) return {ok:true, outMap};
-    const size = 40; let okAll = true;
-
+    const map = {};
+    if (!REFRESH_SYMBOLS?.length) return map;
+    const size = 40;
     for (let i=0; i<REFRESH_SYMBOLS.length; i+=size) {
       const group = REFRESH_SYMBOLS.slice(i, i+size);
-      const ts = Date.now();
-      const url = "https://query2.finance.yahoo.com/v7/finance/quote?symbols=" + encodeURIComponent(group.join(",")) + "&_=" + ts;
-      try {
-        const j = await fetchJsonSmart(url);
-        const res = (j && j.quoteResponse && j.quoteResponse.result) || [];
-        for (const it of res) { if (!it || !it.symbol) continue; outMap[it.symbol] = it; recomputeAndRender(it.symbol, it); }
-      } catch(e){ okAll = false; }
+      const m = await quotes(group);
+      Object.entries(m).forEach(([sym, q]) => { map[sym]=q; recomputeAndRender(sym, q); });
     }
-    return {ok:okAll, outMap};
+    return map;
   }
 
-  // ---------- News: fetch + summarize ----------
-  function parseRss(doc){
-    const arr = [];
-    const items = doc.querySelectorAll("item, entry");
-    items.forEach(it => {
-      const title = it.querySelector("title")?.textContent?.trim() || "";
-      const link  = it.querySelector("link")?.getAttribute("href") || it.querySelector("link")?.textContent || "";
-      const desc  = it.querySelector("description, summary")?.textContent || "";
-      const pub   = it.querySelector("pubDate, updated, published")?.textContent || "";
-      arr.push({title, link, desc, pub});
-    });
-    return arr;
+  // ======== NEWS & SUMMARY ========
+  const NEWS = [
+    "https://feeds.bloomberg.com/markets/news.rss",
+    "https://www.nasdaq.com/feed/rssoutbound?category=Markets",
+    "https://www.federalreserve.gov/feeds/press_all.xml",
+    "https://www.bls.gov/feed/bls_latest.rss"
+  ];
+
+  async function fetchRss(url){
+    const r = await fetch(`${WORKER_BASE}/rss?url=${encodeURIComponent(url)}`, {cache:"no-store"});
+    if (!r.ok) throw new Error("rss "+r.status);
+    const txt = await r.text();
+    const doc = new DOMParser().parseFromString(txt, "application/xml");
+    return Array.from(doc.querySelectorAll("item, entry")).map(it => ({
+      title: (it.querySelector("title")?.textContent || "").trim(),
+      desc: (it.querySelector("description, summary")?.textContent || "").trim(),
+      pub:  (it.querySelector("pubDate, updated, published")?.textContent || "").trim()
+    }));
   }
 
-  function buildMarketSummary(indexMap, headlines){
-    // Pull direction from indices
+  function oneLineSummary(indexMap, headlines){
     const spx = indexMap["^GSPC"], dji = indexMap["^DJI"];
     const spxPct = spx?.regularMarketChangePercent ?? 0;
     const djiPct = dji?.regularMarketChangePercent ?? 0;
     const dir = spxPct >= 0 ? "higher" : "lower";
+    const lead = `As of ${new Date().toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})} CT, U.S. stocks trade ${dir} (S&P 500 ${fmtPct(spxPct)}, Dow ${fmtPct(djiPct)}).`;
 
-    // Simple keyword scoring for econ & policy signal
+    // Tag-based extraction from last 24h headlines
     const now = Date.now();
-    const fresh = headlines.filter(h => {
-      const t = Date.parse(h.pub || "") || now;
-      return (now - t) < 1000*60*60*24; // last 24h
-    });
+    const fresh = headlines.filter(h => (now - (Date.parse(h.pub || "")||now)) < 24*3600*1000);
+    const hit = (re) => fresh.find(h => re.test((h.title+" "+h.desc)));
+    const fed    = hit(/\b(Fed|FOMC|Powell|rate|cut|hike|dot plot|QT|QE)\b/i);
+    const infl   = hit(/\b(CPI|inflation|PCE|core PCE|PPI)\b/i);
+    const jobs   = hit(/\b(payrolls|NFP|jobless|unemployment|JOLTS)\b/i);
+    const cons   = hit(/\b(retail sales|consumer confidence|Michigan|Conference Board)\b/i);
+    const earn   = hit(/\b(earnings|guidance|revenue|sales|EPS|outlook)\b/i);
+    const rates  = hit(/\b(Treasury|yield|10-year|curve|spread)\b/i);
+    const geo    = hit(/\b(China|tariff|sanction|Ukraine|Gaza|Israel|Russia|Middle East)\b/i);
 
-    const pick = (kw) => fresh.find(h => new RegExp(kw, "i").test(h.title + " " + h.desc));
-    const fed    = pick("\\b(Fed|FOMC|Powell|rate|hike|cut|dot plot|QT|QE)\\b");
-    const cpi    = pick("\\b(CPI|inflation|PCE|core PCE|PPI)\\b");
-    const labor  = pick("\\b(payrolls|NFP|unemployment|jobless|JOLTS)\\b");
-    const retail = pick("\\b(retail sales|consumer confidence|Michigan|Conference Board)\\b");
-    const earns  = pick("\\b(earnings|guidance|revenue|sales|EPS|outlook)\\b");
-    const geo    = pick("\\b(China|tariff|sanction|Ukraine|Middle East|Gaza|Israel|Russia)\\b");
-    const rates  = pick("\\b(yield|Treasury|10-year|curve|spread)\\b");
+    const bits = [];
+    if (infl)  bits.push(`Inflation: ${infl.title}`);
+    if (jobs)  bits.push(`Labor: ${jobs.title}`);
+    if (cons)  bits.push(`Consumer: ${cons.title}`);
+    if (earn)  bits.push(`Earnings: ${earn.title}`);
+    if (rates) bits.push(`Rates: ${rates.title}`);
+    if (fed)   bits.push(`Fed: ${fed.title}`);
+    if (geo)   bits.push(`Geopolitics: ${geo.title}`);
 
-    const parts = [];
-    parts.push(`Stocks are ${dir} with S&P 500 ${fmtPct(spxPct)} and Dow ${fmtPct(djiPct)}.`);
-
-    if (fed)   parts.push(`Fed: ${fed.title.replace(/<[^>]+>/g,"")}`);
-    if (cpi)   parts.push(`Inflation: ${cpi.title.replace(/<[^>]+>/g,"")}`);
-    if (labor) parts.push(`Jobs: ${labor.title.replace(/<[^>]+>/g,"")}`);
-    if (retail)parts.push(`Consumer: ${retail.title.replace(/<[^>]+>/g,"")}`);
-    if (earns) parts.push(`Earnings: ${earns.title.replace(/<[^>]+>/g,"")}`);
-    if (rates) parts.push(`Rates: ${rates.title.replace(/<[^>]+>/g,"")}`);
-    if (geo)   parts.push(`Macro risk: ${geo.title.replace(/<[^>]+>/g,"")}`);
-
-    // Fallback if feeds are quiet
-    if (parts.length <= 1) parts.push("No major data or policy headlines in the past few hours.");
-
-    return parts.join(" ");
+    const drivers = bits.length ? ` Drivers: ${bits.join(' ')}`
+                                : ` Drivers: no major macro headlines in the past few hours.`;
+    return (lead + drivers).replace(/\s+/g, " ").trim();
   }
 
-  let lastNewsUpdate = 0;
+  let lastNews = 0;
   async function refreshNews(indexMap){
     const now = Date.now();
-    if (now - lastNewsUpdate < 5*60*1000) return; // throttle to 5 minutes
-    lastNewsUpdate = now;
-
+    if (now - lastNews < 5*60*1000) return; // 5-minute throttle
+    lastNews = now;
     try {
-      const docs = await Promise.all(NEWS_SOURCES.map(fetchXmlSmart));
-      const headlines = docs.flatMap(parseRss);
-      const summary = buildMarketSummary(indexMap, headlines);
-      const el = document.getElementById("ai_summary");
-      if (el) el.textContent = summary;
-    } catch(e){
-      // keep old summary if fetch failed
-      console.log("news refresh failed", e);
+      const all = (await Promise.all(NEWS.map(fetchRss))).flat();
+      $("ai_summary").textContent = oneLineSummary(indexMap, all);
+    } catch (e) {
+      // keep old text
     }
   }
 
-  async function doRefresh(){
-    const [idxRes, tabRes] = await Promise.all([refreshIndicesAndStatus(), refreshTables()]);
-    // always attempt a news refresh; summary uses indices + latest headlines
-    await refreshNews(idxRes.idxMap || {});
-    setUpdatedNow(idxRes.ok && tabRes.ok);
-  }
-
-  // Auto-refresh prices every 60s; news throttled inside refreshNews()
-  setInterval(doRefresh, 60000);
-  doRefresh();
-</script>
-
-  // ---------- CORS-safe fetch (normal → proxy fallback) ----------
-  async function fetchJsonSmart(url){
-    // try direct first
-    try{
-      const r = await fetch(url, {cache:"no-store", mode:"cors"});
-      if (!r.ok) throw new Error("HTTP "+r.status);
-      return await r.json();
-    }catch(e1){
-      // fallback via r.jina.ai which adds permissive CORS; returns text
-      try{
-        const proxied = "https://r.jina.ai/http/" + url.replace(/^https?:\/\//, "");
-        const r = await fetch(proxied, {cache:"no-store"});
-        if (!r.ok) throw new Error("HTTP "+r.status);
-        const txt = await r.text();
-        return JSON.parse(txt);
-      }catch(e2){
-        console.log("fetchJsonSmart failed:", e1, e2);
-        throw e2;
-      }
-    }
-  }
-  // ---------------------------------------------------------------
-
-  function recomputeAndRender(sym, quote){
-    const row = document.querySelector(`tr[data-symbol="${sym}"]`);
-    if (!row) return;
-
-    // Baselines
-    let prev  = parseFloat(row.getAttribute("data-prev"));
-    const mbase = parseFloat(row.getAttribute("data-mbase"));
-    const ybase = parseFloat(row.getAttribute("data-ybase"));
-    const price = quote?.regularMarketPrice ?? quote?.price ?? NaN;
-
-    if (isNaN(prev) && quote?.regularMarketPreviousClose != null) prev = +quote.regularMarketPreviousClose;
-
-    // Price
-    if (!isNaN(price)) {
-      const pEl = document.getElementById("p_"+sym);
-      if (pEl){ pEl.textContent = fmtPrice(price); pulse(pEl); }
-    }
-
-    // Day: $ and %
-    let dayAbs = null, dayPct = null;
-    if (!isNaN(prev) && prev !== 0 && !isNaN(price)) {
-      dayAbs = price - prev;
-      dayPct = (price/prev - 1) * 100.0;
-    } else {
-      if (quote?.regularMarketChange != null) dayAbs = +quote.regularMarketChange;
-      if (quote?.regularMarketChangePercent != null) dayPct = +quote.regularMarketChangePercent;
-    }
-    const daEl = document.getElementById("da_"+sym);
-    const dpEl = document.getElementById("dp_"+sym);
-    if (daEl && dayAbs != null) {
-      daEl.textContent = fmtAbs(dayAbs);
-      daEl.className = (dayAbs >= 0 ? "gain" : "loss");
-      pulse(daEl);
-    }
-    if (dpEl && dayPct != null) {
-      dpEl.textContent = "(" + fmtPct(dayPct) + ")";
-      dpEl.className = "dim " + (dayPct >= 0 ? "gain" : "loss");
-      pulse(dpEl);
-    }
-
-    // Month %
-    const mEl = document.getElementById("m_"+sym);
-    if (mEl && !isNaN(mbase) && mbase !== 0 && !isNaN(price)) {
-      const mPct = (price/mbase - 1) * 100.0;
-      mEl.textContent = fmtPct(mPct);
-      mEl.className = mPct >= 0 ? "gain" : "loss";
-      pulse(mEl);
-    }
-
-    // YTD %
-    const yEl = document.getElementById("y_"+sym);
-    if (yEl && !isNaN(ybase) && ybase !== 0 && !isNaN(price)) {
-      const yPct = (price/ybase - 1) * 100.0;
-      yEl.textContent = fmtPct(yPct);
-      yEl.className = yPct >= 0 ? "gain" : "loss";
-      pulse(yEl);
-    }
-  }
-
-  function summarize(idxQuotes, itemQuotes){
-    try{
-      const dji = idxQuotes["^DJI"], gspc = idxQuotes["^GSPC"];
-      const djiPct = dji?.regularMarketChangePercent ?? 0;
-      const gspcPct = gspc?.regularMarketChangePercent ?? 0;
-
-      const parts = [];
-      const dir = gspcPct >= 0 ? "higher" : "lower";
-      parts.push(`U.S. equities are trading ${dir} — S&P 500 ${fmtPct(gspcPct)}, Dow ${fmtPct(djiPct)}.`);
-
-      const qqq  = itemQuotes["QQQ"] || itemQuotes["QQQM"];
-      const smh  = itemQuotes["SMH"];
-      const arkk = itemQuotes["ARKK"];
-      const tlt  = itemQuotes["TLT"];
-      const spy  = itemQuotes["SPY"];
-      const qqqp = qqq?.regularMarketChangePercent;
-      const spyp = spy?.regularMarketChangePercent;
-      if (qqqp != null && spyp != null) {
-        if (qqqp > spyp + 0.2) parts.push("Growth/tech leading (QQQ > SPY).");
-        else if (spyp > qqqp + 0.2) parts.push("Large caps outpacing growth (SPY > QQQ).");
-      }
-      if (smh?.regularMarketChangePercent != null) {
-        const p = smh.regularMarketChangePercent; parts.push(`Semis ${p>=0?"firm":"soft"} (SMH ${fmtPct(p)}).`);
-      }
-      if (arkk?.regularMarketChangePercent != null) {
-        const p = arkk.regularMarketChangePercent; parts.push(`High-beta ${p>=0?"bid":"under pressure"} (ARKK ${fmtPct(p)}).`);
-      }
-      if (tlt?.regularMarketChangePercent != null) {
-        const p = tlt.regularMarketChangePercent; parts.push(`Rates proxy TLT ${fmtPct(p)} ${p>0?"(yields down)":"(yields up)"} .`);
-      }
-
-      // top movers among tracked
-      const movers = [];
-      for (const [sym, q] of Object.entries(itemQuotes)){
-        const p = q?.regularMarketChangePercent;
-        if (p == null) continue;
-        movers.push([sym, +p]);
-      }
-      movers.sort((a,b)=>b[1]-a[1]);
-      const up = movers.slice(0,3).map(([s,v])=>`${s} ${fmtPct(v)}`).join(", ");
-      const dn = movers.slice(-3).reverse().map(([s,v])=>`${s} ${fmtPct(v)}`).join(", ");
-      if (up) parts.push(`Leaders: ${up}.`);
-      if (dn) parts.push(`Laggards: ${dn}.`);
-
-      const el = document.getElementById("ai_summary");
-      if (el) el.textContent = parts.join(" ");
-    }catch(e){
-      console.log("Summary failed:", e);
-    }
-  }
-
-  async function refreshIndicesAndStatus(){
-    const ts = Date.now();
-    const url = "https://query2.finance.yahoo.com/v7/finance/quote?symbols=%5EDJI,%5EGSPC&_=" + ts;
+  // ======== MAIN LOOP ========
+  async function tick(){
     try {
-      const j = await fetchJsonSmart(url);
-      const res = (j && j.quoteResponse && j.quoteResponse.result) || [];
-      const idxMap = {};
-      for (const it of res) { if (it && it.symbol) idxMap[it.symbol] = it; }
-
-      const dji = idxMap["^DJI"];
-      if (dji) {
-        const price = dji.regularMarketPrice ?? 0;
-        const chg = dji.regularMarketChange ?? 0;
-        const pct = dji.regularMarketChangePercent ?? 0;
-        const cls = chg >= 0 ? "gain" : "loss";
-        const pEl = document.getElementById("dji_price");
-        const aEl = document.getElementById("dji_chg");
-        const pPct = document.getElementById("dji_chg_pct");
-        if (pEl){ pEl.textContent = fmtPrice(price); pulse(pEl); }
-        if (aEl){ aEl.textContent = (chg>=0?"+":"") + chg.toFixed(2); aEl.className = cls; pulse(aEl); }
-        if (pPct){ pPct.textContent = fmtPct(pct); pPct.className = cls; pulse(pPct); }
-      }
-
-      const gspc = idxMap["^GSPC"];
-      if (gspc) {
-        const price = gspc.regularMarketPrice ?? 0;
-        const chg = gspc.regularMarketChange ?? 0;
-        const pct = gspc.regularMarketChangePercent ?? 0;
-        const cls = chg >= 0 ? "gain" : "loss";
-        const pEl = document.getElementById("gspc_price");
-        const aEl = document.getElementById("gspc_chg");
-        const pPct = document.getElementById("gspc_chg_pct");
-        if (pEl){ pEl.textContent = fmtPrice(price); pulse(pEl); }
-        if (aEl){ aEl.textContent = (chg>=0?"+":"") + chg.toFixed(2); aEl.className = cls; pulse(aEl); }
-        if (pPct){ pPct.textContent = fmtPct(pct); pPct.className = cls; pulse(pPct); }
-      }
-
-      const anyState = (Object.values(idxMap).find(x => x && x.marketState)?.marketState) || null;
-      if (anyState) setMarketStatusFromState(anyState); else setMarketStatusFallback();
-
-      return {ok:true, idxMap};
+      const idx = await refreshIndices();
+      const qmap = await refreshTables();
+      await refreshNews(idx);
+      setUpdatedNow(true);
     } catch(e){
-      console.log("Index/status refresh failed:", e);
-      setMarketStatusFallback();
-      return {ok:false, idxMap:{}};
+      setUpdatedNow(false);
     }
   }
-
-  async function refreshTables(){
-    const outMap = {};
-    if (!REFRESH_SYMBOLS || !REFRESH_SYMBOLS.length) return {ok:true, outMap};
-
-    const size = 40;
-    let okAll = true;
-    for (let i=0; i<REFRESH_SYMBOLS.length; i+=size) {
-      const group = REFRESH_SYMBOLS.slice(i, i+size);
-      const ts = Date.now();
-      const url = "https://query2.finance.yahoo.com/v7/finance/quote?symbols=" +
-                  encodeURIComponent(group.join(",")) + "&_=" + ts;
-      try {
-        const j = await fetchJsonSmart(url);
-        const res = (j && j.quoteResponse && j.quoteResponse.result) || [];
-        for (const it of res) {
-          if (!it || !it.symbol) continue;
-          outMap[it.symbol] = it;
-          recomputeAndRender(it.symbol, it);
-        }
-      } catch(e){
-        console.log("Table refresh failed for chunk:", group, e);
-        okAll = false;
-      }
-    }
-    return {ok:okAll, outMap};
-  }
-
-  async function doRefresh(){
-    const [idxRes, tabRes] = await Promise.all([refreshIndicesAndStatus(), refreshTables()]);
-    summarize(idxRes.idxMap, tabRes.outMap);
-    setUpdatedNow(idxRes.ok && tabRes.ok);
-  }
-
-  // Auto-refresh every 60s + initial load
-  setInterval(doRefresh, 60000);
-  doRefresh();
+  setInterval(tick, 60000);
+  tick();
 </script>
 </body>
 </html>
@@ -731,16 +394,13 @@ def render_html(ctx):
 def main():
     clean_output_dir()
 
-    # Universe from files
     stocks = read_tickers(STOCKS_FILE, default=["AAPL","MSFT","NVDA","AMZN","GOOGL","META"])
     etfs   = read_tickers(ETFS_FILE,   default=["SPY","QQQ","DIA","IWM","TLT","SMH","ARKK"])
     universe = list(dict.fromkeys(stocks + etfs))
-
-    # Fetch histories (universe ∪ Mike's list)
     all_symbols = list(dict.fromkeys(universe + MIKE_TICKERS))
+
     histories = fetch_histories(all_symbols)
 
-    # Compute metrics & baselines (skip symbols with no history)
     rows = []
     for t in all_symbols:
         s = histories.get(t)
@@ -763,76 +423,52 @@ def main():
         })
     df = pd.DataFrame(rows)
 
-    # Names
-    names = names_for_tickers(df["Ticker"].tolist()) if not df.empty else {}
+    names = {}
+    if not df.empty:
+        names = names_for_tickers(df["Ticker"].tolist())
     df["Name"] = df["Ticker"].map(names).fillna(df["Ticker"])
 
-    # Rank & Top-10 (combined)
-    rank_col = {"day": "Day", "month": "Month", "ytd": "YTD"}.get(RANK_HORIZON.lower(), "Month")
-    df_top = df[~df[rank_col].isna()].sort_values(by=rank_col, ascending=False).head(TOP_N).copy()
+    # Rank by Month for Top N
+    df_top = df[~df["Month"].isna()].sort_values(by="Month", ascending=False).head(TOP_N).copy()
 
-    # Mike's subset (keep specified order)
-    order_map = {t: i for i, t in enumerate(MIKE_TICKERS)}
+    # Mike list in given order
+    order_map = {t:i for i,t in enumerate(MIKE_TICKERS)}
     df_mike = df[df["Ticker"].isin(order_map)].copy()
     df_mike["__order"] = df_mike["Ticker"].map(order_map)
     df_mike = df_mike.sort_values("__order").drop(columns="__order")
 
-    def rows_for_html(df_):
-        out = []
-        for _, r in df_.iterrows():
+    def rows_for_html(d):
+        out=[]
+        for _, r in d.iterrows():
             out.append({
                 "Ticker": r["Ticker"], "Name": r["Name"],
                 "Price": "—" if pd.isna(r["Price"]) else f"{float(r['Price']):,.2f}",
-                "Day": "—" if pd.isna(r["Day"]) else f"{float(r['Day']):+.2%}",
-                "DayAbs": "—" if pd.isna(r["DayAbs"]) else f"{float(r['DayAbs']):+,.2f}",
+                "Day": "—"   if pd.isna(r["Day"])   else f"{float(r['Day']):+.2%}",
+                "DayAbs": "—"if pd.isna(r["DayAbs"])else f"{float(r['DayAbs']):+,.2f}",
                 "Month": "—" if pd.isna(r["Month"]) else f"{float(r['Month']):+.2%}",
-                "YTD": "—" if pd.isna(r["YTD"]) else f"{float(r['YTD']):+.2%}",
-                "Day_val": 0.0 if pd.isna(r["Day"]) else float(r["Day"]),
-                "DayAbs_val": 0.0 if pd.isna(r["DayAbs"]) else float(r["DayAbs"]),
-                "Month_val": 0.0 if pd.isna(r["Month"]) else float(r["Month"]),
-                "YTD_val": 0.0 if pd.isna(r["YTD"]) else float(r["YTD"]),
+                "YTD": "—"   if pd.isna(r["YTD"])   else f"{float(r['YTD']):+.2%}",
                 "PrevCloseRaw": "" if pd.isna(r["PrevClose"]) else float(r["PrevClose"]),
                 "MonthBaseRaw": "" if pd.isna(r["MonthBase"]) else float(r["MonthBase"]),
                 "YtdBaseRaw": "" if pd.isna(r["YtdBase"]) else float(r["YtdBase"]),
             })
         return out
 
-    top_rows  = rows_for_html(df_top)
-    mike_rows = rows_for_html(df_mike)
-
-    # Symbols to refresh on page (Top10 ∪ Mike)
     refresh_symbols = sorted(set(df_top["Ticker"].tolist()) | set(df_mike["Ticker"].tolist()))
     if not refresh_symbols:
         refresh_symbols = MIKE_TICKERS
 
-    # Seed index banner from last two closes
-    dji_last, dji_chg_abs, dji_chg_pct = fetch_index_day_snapshot("^DJI")
-    gspc_last, gspc_chg_abs, gspc_chg_pct = fetch_index_day_snapshot("^GSPC")
-
-    updated_human = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
     html = render_html({
         "title": TITLE,
-        "updated_human": updated_human,
-        "tz": TZ,
-        "rank_horizon": rank_col,
         "top_n": TOP_N,
-        "top_rows": top_rows,
-        "mike_rows": mike_rows,
+        "top_rows": rows_for_html(df_top),
+        "mike_rows": rows_for_html(df_mike),
         "refresh_symbols_json": json.dumps(refresh_symbols),
-        # indices
-        "dji_price": "—" if pd.isna(dji_last) else f"{dji_last:,.2f}",
-        "dji_chg": "—" if pd.isna(dji_chg_abs) else f"{dji_chg_abs:+,.2f}",
-        "dji_chg_pct": "—" if pd.isna(dji_chg_pct) else f"{dji_chg_pct:+.2%}",
-        "dji_chg_val": 0 if pd.isna(dji_chg_abs) else float(dji_chg_abs),
-        "gspc_price": "—" if pd.isna(gspc_last) else f"{gspc_last:,.2f}",
-        "gspc_chg": "—" if pd.isna(gspc_chg_abs) else f"{gspc_chg_abs:+,.2f}",
-        "gspc_chg_pct": "—" if pd.isna(gspc_chg_pct) else f"{gspc_chg_pct:+.2%}",
-        "gspc_chg_val": 0 if pd.isna(gspc_chg_abs) else float(gspc_chg_abs),
+        "worker_base": WORKER_BASE
     })
     with open(os.path.join(OUT_DIR, "index.html"), "w", encoding="utf-8") as f:
         f.write(html)
 
-    print("✅ Built page with mobile-safe live auto-refresh, market status, and daily summary. Missing tickers skipped.")
+    print("✅ Built page using Cloudflare Worker for live quotes/news + clean summary paragraph.")
 
 if __name__ == "__main__":
     try:

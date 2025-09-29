@@ -266,13 +266,26 @@ def render_html(ctx):
   </footer>
 
 <script>
+  // ---------- symbols to refresh (server injects this) ----------
   const REFRESH_SYMBOLS = {{ refresh_symbols_json | safe }};
 
+  // ---------- NEWS SOURCES (add/remove if you like) ----------
+  // We fetch XML RSS and parse it client-side, with a CORS-safe proxy fallback.
+  const NEWS_SOURCES = [
+    // Market-moving “fast” headlines
+    "https://feeds.bloomberg.com/markets/news.rss",        // Bloomberg Markets RSS
+    "https://www.nasdaq.com/feed/rssoutbound?category=Markets", // Nasdaq Markets RSS
+    // Policy / macro releases
+    "https://www.federalreserve.gov/feeds/press_all.xml",  // Fed press (all)
+    "https://www.bls.gov/feed/bls_latest.rss"              // BLS latest
+  ];
+
+  // ---------- general utils ----------
   function fmtPrice(x){ return (x ?? 0).toFixed(2); }
   function fmtPct(x){ return (x >= 0 ? "+" : "") + (x ?? 0).toFixed(2) + "%"; }
   function fmtAbs(x){ const v = (x ?? 0); return (v >= 0 ? "+" : "") + Math.abs(v).toFixed(2); }
   function pulse(el){ if(!el) return; el.classList.add("pulse"); setTimeout(()=>el.classList.remove("pulse"), 600); }
-  function showError(show){ document.getElementById("refresh_error").style.display = show ? "block" : "none"; }
+  function showError(show){ const n=document.getElementById("refresh_error"); if(n) n.style.display = show ? "block" : "none"; }
   function setUpdatedNow(ok=true){
     const d = new Date();
     const hh = String(d.getHours()).padStart(2,"0");
@@ -290,14 +303,207 @@ def render_html(ctx):
     document.getElementById("market_status").textContent = label;
   }
   function setMarketStatusFallback(){
-    // Fallback: Mon–Fri, 8:30–15:00 CT = Open; 15:00–19:00 = After Hours
-    const d = new Date();
-    const day = d.getDay(); if (day === 0 || day === 6) { setMarketStatusFromState("CLOSED"); return; }
+    const d = new Date(), day = d.getDay();
+    if (day === 0 || day === 6) { setMarketStatusFromState("CLOSED"); return; }
     const mins = d.getHours()*60 + d.getMinutes();
     if (mins >= 8*60+30 && mins <= 15*60) setMarketStatusFromState("REGULAR");
     else if (mins > 15*60 && mins <= 19*60) setMarketStatusFromState("POST");
     else setMarketStatusFromState("CLOSED");
   }
+
+  // ---------- CORS-safe fetchers ----------
+  async function fetchJsonSmart(url){
+    try{
+      const r = await fetch(url, {cache:"no-store", mode:"cors"});
+      if (!r.ok) throw new Error("HTTP "+r.status);
+      return await r.json();
+    }catch(e1){
+      // r.jina.ai proxies the same URL with permissive CORS; returns text
+      const proxied = "https://r.jina.ai/http/" + url.replace(/^https?:\/\//, "");
+      const r = await fetch(proxied, {cache:"no-store"});
+      if (!r.ok) throw new Error("HTTP "+r.status);
+      return JSON.parse(await r.text());
+    }
+  }
+  async function fetchXmlSmart(url){
+    try{
+      const r = await fetch(url, {cache:"no-store", mode:"cors"});
+      if (!r.ok) throw new Error("HTTP "+r.status);
+      return (new window.DOMParser()).parseFromString(await r.text(), "text/xml");
+    }catch(e1){
+      const proxied = "https://r.jina.ai/http/" + url.replace(/^https?:\/\//, "");
+      const r = await fetch(proxied, {cache:"no-store"});
+      if (!r.ok) throw new Error("HTTP "+r.status);
+      return (new window.DOMParser()).parseFromString(await r.text(), "text/xml");
+    }
+  }
+
+  // ---------- Prices & indices ----------
+  function recomputeAndRender(sym, quote){
+    const row = document.querySelector(`tr[data-symbol="${sym}"]`);
+    if (!row) return;
+
+    // baselines from static build
+    let prev  = parseFloat(row.getAttribute("data-prev"));
+    const mbase = parseFloat(row.getAttribute("data-mbase"));
+    const ybase = parseFloat(row.getAttribute("data-ybase"));
+    const price = quote?.regularMarketPrice ?? quote?.price ?? NaN;
+    if (isNaN(prev) && quote?.regularMarketPreviousClose != null) prev = +quote.regularMarketPreviousClose;
+
+    // price
+    if (!isNaN(price)) { const pEl = document.getElementById("p_"+sym); if (pEl){ pEl.textContent = fmtPrice(price); pulse(pEl); } }
+
+    // day: $ and %
+    let dayAbs = null, dayPct = null;
+    if (!isNaN(prev) && prev !== 0 && !isNaN(price)) { dayAbs = price - prev; dayPct = (price/prev - 1) * 100.0; }
+    else { if (quote?.regularMarketChange != null) dayAbs = +quote.regularMarketChange; if (quote?.regularMarketChangePercent != null) dayPct = +quote.regularMarketChangePercent; }
+
+    const daEl = document.getElementById("da_"+sym), dpEl = document.getElementById("dp_"+sym);
+    if (daEl && dayAbs != null) { daEl.textContent = fmtAbs(dayAbs); daEl.className = (dayAbs >= 0 ? "gain" : "loss"); pulse(daEl); }
+    if (dpEl && dayPct != null) { dpEl.textContent = "(" + fmtPct(dayPct) + ")"; dpEl.className = "dim " + (dayPct >= 0 ? "gain" : "loss"); pulse(dpEl); }
+
+    // month %
+    const mEl = document.getElementById("m_"+sym);
+    if (mEl && !isNaN(mbase) && mbase !== 0 && !isNaN(price)) { const mPct = (price/mbase - 1) * 100.0; mEl.textContent = fmtPct(mPct); mEl.className = mPct >= 0 ? "gain" : "loss"; pulse(mEl); }
+
+    // ytd %
+    const yEl = document.getElementById("y_"+sym);
+    if (yEl && !isNaN(ybase) && ybase !== 0 && !isNaN(price)) { const yPct = (price/ybase - 1) * 100.0; yEl.textContent = fmtPct(yPct); yEl.className = yPct >= 0 ? "gain" : "loss"; pulse(yEl); }
+  }
+
+  async function refreshIndicesAndStatus(){
+    const ts = Date.now();
+    const url = "https://query2.finance.yahoo.com/v7/finance/quote?symbols=%5EDJI,%5EGSPC&_=" + ts;
+    try {
+      const j = await fetchJsonSmart(url);
+      const res = (j && j.quoteResponse && j.quoteResponse.result) || [];
+      const idxMap = {}; for (const it of res) { if (it && it.symbol) idxMap[it.symbol] = it; }
+
+      function upd(idPrefix, it){
+        if (!it) return;
+        const price = it.regularMarketPrice ?? 0, chg = it.regularMarketChange ?? 0, pct = it.regularMarketChangePercent ?? 0;
+        const cls = chg >= 0 ? "gain" : "loss";
+        const pEl = document.getElementById(idPrefix+"_price");
+        const aEl = document.getElementById(idPrefix+"_chg");
+        const pPct = document.getElementById(idPrefix+"_chg_pct");
+        if (pEl){ pEl.textContent = fmtPrice(price); pulse(pEl); }
+        if (aEl){ aEl.textContent = (chg>=0?"+":"") + chg.toFixed(2); aEl.className = cls; pulse(aEl); }
+        if (pPct){ pPct.textContent = fmtPct(pct); pPct.className = cls; pulse(pPct); }
+      }
+      upd("dji", idxMap["^DJI"]);
+      upd("gspc", idxMap["^GSPC"]);
+
+      const anyState = (Object.values(idxMap).find(x => x && x.marketState)?.marketState) || null;
+      if (anyState) setMarketStatusFromState(anyState); else setMarketStatusFallback();
+
+      return {ok:true, idxMap};
+    } catch(e){
+      setMarketStatusFallback();
+      return {ok:false, idxMap:{}};
+    }
+  }
+
+  async function refreshTables(){
+    const outMap = {};
+    if (!REFRESH_SYMBOLS || !REFRESH_SYMBOLS.length) return {ok:true, outMap};
+    const size = 40; let okAll = true;
+
+    for (let i=0; i<REFRESH_SYMBOLS.length; i+=size) {
+      const group = REFRESH_SYMBOLS.slice(i, i+size);
+      const ts = Date.now();
+      const url = "https://query2.finance.yahoo.com/v7/finance/quote?symbols=" + encodeURIComponent(group.join(",")) + "&_=" + ts;
+      try {
+        const j = await fetchJsonSmart(url);
+        const res = (j && j.quoteResponse && j.quoteResponse.result) || [];
+        for (const it of res) { if (!it || !it.symbol) continue; outMap[it.symbol] = it; recomputeAndRender(it.symbol, it); }
+      } catch(e){ okAll = false; }
+    }
+    return {ok:okAll, outMap};
+  }
+
+  // ---------- News: fetch + summarize ----------
+  function parseRss(doc){
+    const arr = [];
+    const items = doc.querySelectorAll("item, entry");
+    items.forEach(it => {
+      const title = it.querySelector("title")?.textContent?.trim() || "";
+      const link  = it.querySelector("link")?.getAttribute("href") || it.querySelector("link")?.textContent || "";
+      const desc  = it.querySelector("description, summary")?.textContent || "";
+      const pub   = it.querySelector("pubDate, updated, published")?.textContent || "";
+      arr.push({title, link, desc, pub});
+    });
+    return arr;
+  }
+
+  function buildMarketSummary(indexMap, headlines){
+    // Pull direction from indices
+    const spx = indexMap["^GSPC"], dji = indexMap["^DJI"];
+    const spxPct = spx?.regularMarketChangePercent ?? 0;
+    const djiPct = dji?.regularMarketChangePercent ?? 0;
+    const dir = spxPct >= 0 ? "higher" : "lower";
+
+    // Simple keyword scoring for econ & policy signal
+    const now = Date.now();
+    const fresh = headlines.filter(h => {
+      const t = Date.parse(h.pub || "") || now;
+      return (now - t) < 1000*60*60*24; // last 24h
+    });
+
+    const pick = (kw) => fresh.find(h => new RegExp(kw, "i").test(h.title + " " + h.desc));
+    const fed    = pick("\\b(Fed|FOMC|Powell|rate|hike|cut|dot plot|QT|QE)\\b");
+    const cpi    = pick("\\b(CPI|inflation|PCE|core PCE|PPI)\\b");
+    const labor  = pick("\\b(payrolls|NFP|unemployment|jobless|JOLTS)\\b");
+    const retail = pick("\\b(retail sales|consumer confidence|Michigan|Conference Board)\\b");
+    const earns  = pick("\\b(earnings|guidance|revenue|sales|EPS|outlook)\\b");
+    const geo    = pick("\\b(China|tariff|sanction|Ukraine|Middle East|Gaza|Israel|Russia)\\b");
+    const rates  = pick("\\b(yield|Treasury|10-year|curve|spread)\\b");
+
+    const parts = [];
+    parts.push(`Stocks are ${dir} with S&P 500 ${fmtPct(spxPct)} and Dow ${fmtPct(djiPct)}.`);
+
+    if (fed)   parts.push(`Fed: ${fed.title.replace(/<[^>]+>/g,"")}`);
+    if (cpi)   parts.push(`Inflation: ${cpi.title.replace(/<[^>]+>/g,"")}`);
+    if (labor) parts.push(`Jobs: ${labor.title.replace(/<[^>]+>/g,"")}`);
+    if (retail)parts.push(`Consumer: ${retail.title.replace(/<[^>]+>/g,"")}`);
+    if (earns) parts.push(`Earnings: ${earns.title.replace(/<[^>]+>/g,"")}`);
+    if (rates) parts.push(`Rates: ${rates.title.replace(/<[^>]+>/g,"")}`);
+    if (geo)   parts.push(`Macro risk: ${geo.title.replace(/<[^>]+>/g,"")}`);
+
+    // Fallback if feeds are quiet
+    if (parts.length <= 1) parts.push("No major data or policy headlines in the past few hours.");
+
+    return parts.join(" ");
+  }
+
+  let lastNewsUpdate = 0;
+  async function refreshNews(indexMap){
+    const now = Date.now();
+    if (now - lastNewsUpdate < 5*60*1000) return; // throttle to 5 minutes
+    lastNewsUpdate = now;
+
+    try {
+      const docs = await Promise.all(NEWS_SOURCES.map(fetchXmlSmart));
+      const headlines = docs.flatMap(parseRss);
+      const summary = buildMarketSummary(indexMap, headlines);
+      const el = document.getElementById("ai_summary");
+      if (el) el.textContent = summary;
+    } catch(e){
+      // keep old summary if fetch failed
+      console.log("news refresh failed", e);
+    }
+  }
+
+  async function doRefresh(){
+    const [idxRes, tabRes] = await Promise.all([refreshIndicesAndStatus(), refreshTables()]);
+    // always attempt a news refresh; summary uses indices + latest headlines
+    await refreshNews(idxRes.idxMap || {});
+    setUpdatedNow(idxRes.ok && tabRes.ok);
+  }
+
+  // Auto-refresh prices every 60s; news throttled inside refreshNews()
+  setInterval(doRefresh, 60000);
+  doRefresh();
+</script>
 
   // ---------- CORS-safe fetch (normal → proxy fallback) ----------
   async function fetchJsonSmart(url){

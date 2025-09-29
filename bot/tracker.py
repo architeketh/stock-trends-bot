@@ -17,11 +17,12 @@ TOP_N = 10
 TITLE = "Top 10 Stocks & ETFs — Price · Day · Month · YTD"
 TZ = "America/Chicago"
 
-# >>>>>>>>>>>>>>>> SET THIS TO YOUR WORKER URL (no trailing slash) <<<<<<<<<<<<<<
+# >>>>>>>>>>>>>>>> YOUR LIVE QUOTE/NEWS PROXY (no trailing slash) <<<<<<<<<<<<<<
 WORKER_BASE = "https://polished-moon-50d8.architek-eth.workers.dev"
 
-
-MIKE_TICKERS = ["VOO","VOOG","VUG","VDIGX","QQQM","AAPL","NVDA","IVV","IWF","SE","FBTC","VV","FXAIx","AMZN","CLX","CRM","GBTC","ALRM"]
+# Mike's list (kept; symbols with no history are skipped gracefully)
+MIKE_TICKERS = ["VOO","VOOG","VUG","VDIGX","QQQM","AAPL","NVDA","IVV","IWF","SE",
+                "FBTC","VV","FXAIZ","AMZN","CLX","CRM","GBTC","ALRM"]
 # ---------------------------------------------------------------
 
 def clean_output_dir():
@@ -387,7 +388,6 @@ def render_html(ctx):
     const now = Date.now();
     if (now - lastNews < 5*60*1000) return; // throttle 5 min
     lastNews = now;
-    const t0 = Date.now();
     try {
       const all = (await Promise.all(NEWS.map(fetchRss))).flat();
       const txt = oneLineSummary(indexMap, all);
@@ -403,7 +403,7 @@ def render_html(ctx):
   async function tick(){
     try {
       const idx = await refreshIndices();
-      const qmap = await refreshTables();
+      await refreshTables();
       await refreshNews(idx);
       setUpdatedNow(true);
     } catch(e){
@@ -456,7 +456,7 @@ def main():
         names = names_for_tickers(df["Ticker"].tolist())
     df["Name"] = df["Ticker"].map(names).fillna(df["Ticker"])
 
-    # Rank by Month for Top N
+    # Rank by Month for Top N (combined)
     df_top = df[~df["Month"].isna()].sort_values(by="Month", ascending=False).head(TOP_N).copy()
 
     # Mike list in given order
@@ -491,12 +491,12 @@ def main():
         "top_rows": rows_for_html(df_top),
         "mike_rows": rows_for_html(df_mike),
         "refresh_symbols_json": json.dumps(refresh_symbols),
-        "worker_base": WORKER_BASE = "https://broken-night-0891.architek-eth.workers.dev/"
+        "worker_base": WORKER_BASE
     })
     with open(os.path.join(OUT_DIR, "index.html"), "w", encoding="utf-8") as f:
         f.write(html)
 
-    print("✅ Built page with Worker diagnostics + readable summary. Set WORKER_BASE correctly.")
+    print("✅ Built page with Worker live quotes/news, readable summary, and diagnostics.")
     if "YOUR-WORKER-NAME" in WORKER_BASE:
         print("⚠️  Reminder: You must set WORKER_BASE to your actual Cloudflare Worker URL.")
         sys.exit(1)

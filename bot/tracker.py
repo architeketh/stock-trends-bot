@@ -272,15 +272,15 @@ def render_html(ctx):
   function fmtPct(x){ return (x >= 0 ? "+" : "") + (x ?? 0).toFixed(2) + "%"; }
   function fmtAbs(x){ const v = (x ?? 0); return (v >= 0 ? "+" : "") + Math.abs(v).toFixed(2); }
   function pulse(el){ if(!el) return; el.classList.add("pulse"); setTimeout(()=>el.classList.remove("pulse"), 600); }
+  function showError(show){ document.getElementById("refresh_error").style.display = show ? "block" : "none"; }
   function setUpdatedNow(ok=true){
     const d = new Date();
     const hh = String(d.getHours()).padStart(2,"0");
     const mm = String(d.getMinutes()).padStart(2,"0");
     const ss = String(d.getSeconds()).padStart(2,"0");
-    const el = document.getElementById("last_updated");
-    el.textContent = `${hh}:${mm}:${ss}`;
+    document.getElementById("last_updated").textContent = `${hh}:${mm}:${ss}`;
     pulse(document.getElementById("banner"));
-    document.getElementById("refresh_error").style.display = ok ? "none" : "block";
+    showError(!ok);
   }
   function setMarketStatusFromState(state){
     let label = "Market Closed";
@@ -298,6 +298,29 @@ def render_html(ctx):
     else if (mins > 15*60 && mins <= 19*60) setMarketStatusFromState("POST");
     else setMarketStatusFromState("CLOSED");
   }
+
+  // ---------- CORS-safe fetch (normal → proxy fallback) ----------
+  async function fetchJsonSmart(url){
+    // try direct first
+    try{
+      const r = await fetch(url, {cache:"no-store", mode:"cors"});
+      if (!r.ok) throw new Error("HTTP "+r.status);
+      return await r.json();
+    }catch(e1){
+      // fallback via r.jina.ai which adds permissive CORS; returns text
+      try{
+        const proxied = "https://r.jina.ai/http/" + url.replace(/^https?:\/\//, "");
+        const r = await fetch(proxied, {cache:"no-store"});
+        if (!r.ok) throw new Error("HTTP "+r.status);
+        const txt = await r.text();
+        return JSON.parse(txt);
+      }catch(e2){
+        console.log("fetchJsonSmart failed:", e1, e2);
+        throw e2;
+      }
+    }
+  }
+  // ---------------------------------------------------------------
 
   function recomputeAndRender(sym, quote){
     const row = document.querySelector(`tr[data-symbol="${sym}"]`);
@@ -364,37 +387,29 @@ def render_html(ctx):
       const djiPct = dji?.regularMarketChangePercent ?? 0;
       const gspcPct = gspc?.regularMarketChangePercent ?? 0;
 
-      // check thematic ETFs if present
+      const parts = [];
+      const dir = gspcPct >= 0 ? "higher" : "lower";
+      parts.push(`U.S. equities are trading ${dir} — S&P 500 ${fmtPct(gspcPct)}, Dow ${fmtPct(djiPct)}.`);
+
       const qqq  = itemQuotes["QQQ"] || itemQuotes["QQQM"];
       const smh  = itemQuotes["SMH"];
       const arkk = itemQuotes["ARKK"];
       const tlt  = itemQuotes["TLT"];
       const spy  = itemQuotes["SPY"];
-
-      const parts = [];
-      const dir = gspcPct >= 0 ? "higher" : "lower";
-      parts.push(`U.S. equities are trading ${dir} so far — S&P 500 ${fmtPct(gspcPct)}, Dow ${fmtPct(djiPct)}.`);
-
       const qqqp = qqq?.regularMarketChangePercent;
       const spyp = spy?.regularMarketChangePercent;
       if (qqqp != null && spyp != null) {
-        if (qqqp > spyp + 0.2) parts.push("Growth/tech is leading (QQQ).");
-        else if (spyp > qqqp + 0.2) parts.push("Large caps are outpacing growth (SPY > QQQ).");
+        if (qqqp > spyp + 0.2) parts.push("Growth/tech leading (QQQ > SPY).");
+        else if (spyp > qqqp + 0.2) parts.push("Large caps outpacing growth (SPY > QQQ).");
       }
-
-      const smhp = smh?.regularMarketChangePercent;
-      if (smhp != null) {
-        parts.push(`Semis ${smhp >= 0 ? "firm" : "soft"} (SMH ${fmtPct(smhp)}).`);
+      if (smh?.regularMarketChangePercent != null) {
+        const p = smh.regularMarketChangePercent; parts.push(`Semis ${p>=0?"firm":"soft"} (SMH ${fmtPct(p)}).`);
       }
-
-      const arkkp = arkk?.regularMarketChangePercent;
-      if (arkkp != null) {
-        parts.push(`High-beta ${arkkp >= 0 ? "bid" : "pressure"} (ARKK ${fmtPct(arkkp)}).`);
+      if (arkk?.regularMarketChangePercent != null) {
+        const p = arkk.regularMarketChangePercent; parts.push(`High-beta ${p>=0?"bid":"under pressure"} (ARKK ${fmtPct(p)}).`);
       }
-
-      const tltp = tlt?.regularMarketChangePercent;
-      if (tltp != null) {
-        parts.push(`Rates proxy TLT ${fmtPct(tltp)} ${tltp>0 ? "(yields down)" : "(yields up)"} .`);
+      if (tlt?.regularMarketChangePercent != null) {
+        const p = tlt.regularMarketChangePercent; parts.push(`Rates proxy TLT ${fmtPct(p)} ${p>0?"(yields down)":"(yields up)"} .`);
       }
 
       // top movers among tracked
@@ -417,27 +432,13 @@ def render_html(ctx):
     }
   }
 
-  async function fetchJsonWithFallback(urls){
-    for (const url of urls){
-      try {
-        const r = await fetch(url, {cache:"no-store", mode:"cors"});
-        if (!r.ok) throw new Error("HTTP "+r.status);
-        return await r.json();
-      } catch(e) { /* try next */ }
-    }
-    throw new Error("All endpoints failed");
-  }
-
   async function refreshIndicesAndStatus(){
     const ts = Date.now();
-    const urls = [
-      "https://query2.finance.yahoo.com/v7/finance/quote?symbols=%5EDJI,%5EGSPC&_=" + ts,
-      "https://query1.finance.yahoo.com/v7/finance/quote?symbols=%5EDJI,%5EGSPC&_=" + ts
-    ];
-    const idxMap = {};
+    const url = "https://query2.finance.yahoo.com/v7/finance/quote?symbols=%5EDJI,%5EGSPC&_=" + ts;
     try {
-      const j = await fetchJsonWithFallback(urls);
+      const j = await fetchJsonSmart(url);
       const res = (j && j.quoteResponse && j.quoteResponse.result) || [];
+      const idxMap = {};
       for (const it of res) { if (it && it.symbol) idxMap[it.symbol] = it; }
 
       const dji = idxMap["^DJI"];
@@ -488,12 +489,10 @@ def render_html(ctx):
     for (let i=0; i<REFRESH_SYMBOLS.length; i+=size) {
       const group = REFRESH_SYMBOLS.slice(i, i+size);
       const ts = Date.now();
-      const urls = [
-        "https://query2.finance.yahoo.com/v7/finance/quote?symbols=" + encodeURIComponent(group.join(",")) + "&_=" + ts,
-        "https://query1.finance.yahoo.com/v7/finance/quote?symbols=" + encodeURIComponent(group.join(",")) + "&_=" + ts
-      ];
+      const url = "https://query2.finance.yahoo.com/v7/finance/quote?symbols=" +
+                  encodeURIComponent(group.join(",")) + "&_=" + ts;
       try {
-        const j = await fetchJsonWithFallback(urls);
+        const j = await fetchJsonSmart(url);
         const res = (j && j.quoteResponse && j.quoteResponse.result) || [];
         for (const it of res) {
           if (!it || !it.symbol) continue;
@@ -595,7 +594,7 @@ def main():
     top_rows  = rows_for_html(df_top)
     mike_rows = rows_for_html(df_mike)
 
-    # Symbols to refresh on page (Top10 ∪ Mike). If empty, still refresh Mike's list to enable summary.
+    # Symbols to refresh on page (Top10 ∪ Mike)
     refresh_symbols = sorted(set(df_top["Ticker"].tolist()) | set(df_mike["Ticker"].tolist()))
     if not refresh_symbols:
         refresh_symbols = MIKE_TICKERS
@@ -627,7 +626,7 @@ def main():
     with open(os.path.join(OUT_DIR, "index.html"), "w", encoding="utf-8") as f:
         f.write(html)
 
-    print("✅ Built page with reliable live auto-refresh, bottom summary, and visible error state. Missing tickers skipped.")
+    print("✅ Built page with mobile-safe live auto-refresh, market status, and daily summary. Missing tickers skipped.")
 
 if __name__ == "__main__":
     try:

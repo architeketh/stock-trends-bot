@@ -18,7 +18,7 @@ TITLE = "Top 10 Stocks & ETFs — Price · Day · Month · YTD"
 TZ = "America/Chicago"
 
 # >>>>>>>>>>>>>>>> SET THIS TO YOUR WORKER URL (no trailing slash) <<<<<<<<<<<<<<
-WORKER_BASE = "https://broken-night-0891.architek-eth.workers.dev/"
+WORKER_BASE = "https://YOUR-WORKER-NAME.YOUR-SUBDOMAIN.workers.dev"
 
 MIKE_TICKERS = ["VOO","VOOG","VUG","VDIGX","QQQM","AAPL","NVDA","IVV","IWF","SE","FBTC","VV","FXAIZ","AMZN","CLX","CRM","GBTC","ALRM"]
 # ---------------------------------------------------------------
@@ -121,6 +121,8 @@ def render_html(ctx):
   .daywrap { display:flex; gap:6px; align-items:baseline; }
   .dim { color: var(--muted); font-size: .9em; }
   .error { background: var(--err); padding: 6px 10px; border-radius: 8px; }
+  .ok { color: var(--gain); }
+  .bad { color: var(--loss); }
 </style>
 </head>
 <body>
@@ -146,6 +148,10 @@ def render_html(ctx):
       <div class="row">
         <div class="muted">Last updated: <span id="last_updated">—</span> (CT)</div>
       </div>
+    </div>
+    <div class="muted" style="margin-top:8px;">
+      Live Data Source:
+      <span id="live_src" class="num">{{ worker_base }}</span>
     </div>
     <div class="muted" style="margin-top:8px;">Auto-refreshing every 60 seconds. Day shows $ and %, Month/YTD show %.</div>
     <div id="refresh_error" class="error" style="display:none; margin-top:8px;">Last update failed — retrying…</div>
@@ -204,6 +210,13 @@ def render_html(ctx):
   <div class="card">
     <h2 style="margin:0 0 8px 0;">Daily Market Summary</h2>
     <p id="ai_summary" class="muted">—</p>
+    <div class="muted" id="ai_summary_meta"></div>
+  </div>
+
+  <div class="card">
+    <h2 style="margin:0 0 8px 0;">Diagnostics</h2>
+    <div>Quotes updated: <span id="diag_updated" class="num">0</span></div>
+    <div>Last error: <span id="diag_error" class="num bad">—</span></div>
   </div>
 
   <footer class="muted">Built on GitHub Pages. Not investment advice. Data may be delayed.</footer>
@@ -276,10 +289,17 @@ def render_html(ctx):
     if (yEl && !isNaN(ybase) && ybase!==0 && !isNaN(price)){ const yPct=(price/ybase-1)*100.0; yEl.textContent=fmtPct(yPct); pulse(yEl); }
   }
 
-  // ======== QUOTES ========
+  // ======== QUOTES via Worker ========
   async function quotes(symbols){
+    if (!WORKER_BASE || WORKER_BASE.startsWith("https://YOUR-WORKER")) {
+      throw new Error("WORKER_BASE not set");
+    }
     const url = `${WORKER_BASE}/quote?symbols=${encodeURIComponent(symbols.join(","))}`;
-    const r = await fetch(url, {cache:"no-store"}); if (!r.ok) throw new Error("quotes "+r.status);
+    const r = await fetch(url, {cache:"no-store"});
+    if (!r.ok) {
+      const txt = await r.text().catch(()=>String(r.status));
+      throw new Error(`quotes ${r.status}: ${txt.slice(0,200)}`);
+    }
     const j = await r.json();
     const res = (j && j.quoteResponse && j.quoteResponse.result) || [];
     const map = {}; res.forEach(it => { if (it?.symbol) map[it.symbol] = it; });
@@ -297,16 +317,18 @@ def render_html(ctx):
   async function refreshTables(){
     const map = {};
     if (!REFRESH_SYMBOLS?.length) return map;
+    let updated = 0;
     const size = 40;
     for (let i=0; i<REFRESH_SYMBOLS.length; i+=size) {
       const group = REFRESH_SYMBOLS.slice(i, i+size);
       const m = await quotes(group);
-      Object.entries(m).forEach(([sym, q]) => { map[sym]=q; recomputeAndRender(sym, q); });
+      Object.entries(m).forEach(([sym, q]) => { map[sym]=q; recomputeAndRender(sym, q); updated++; });
     }
+    $("diag_updated").textContent = updated.toString();
     return map;
   }
 
-  // ======== NEWS & SUMMARY ========
+  // ======== NEWS & SUMMARY (via Worker → RSS) ========
   const NEWS = [
     "https://feeds.bloomberg.com/markets/news.rss",
     "https://www.nasdaq.com/feed/rssoutbound?category=Markets",
@@ -333,7 +355,7 @@ def render_html(ctx):
     const dir = spxPct >= 0 ? "higher" : "lower";
     const lead = `As of ${new Date().toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})} CT, U.S. stocks trade ${dir} (S&P 500 ${fmtPct(spxPct)}, Dow ${fmtPct(djiPct)}).`;
 
-    // Tag-based extraction from last 24h headlines
+    // headlines → drivers (last 24h)
     const now = Date.now();
     const fresh = headlines.filter(h => (now - (Date.parse(h.pub || "")||now)) < 24*3600*1000);
     const hit = (re) => fresh.find(h => re.test((h.title+" "+h.desc)));
@@ -362,13 +384,17 @@ def render_html(ctx):
   let lastNews = 0;
   async function refreshNews(indexMap){
     const now = Date.now();
-    if (now - lastNews < 5*60*1000) return; // 5-minute throttle
+    if (now - lastNews < 5*60*1000) return; // throttle 5 min
     lastNews = now;
+    const t0 = Date.now();
     try {
       const all = (await Promise.all(NEWS.map(fetchRss))).flat();
-      $("ai_summary").textContent = oneLineSummary(indexMap, all);
+      const txt = oneLineSummary(indexMap, all);
+      $("ai_summary").textContent = txt;
+      $("ai_summary_meta").textContent = `Updated ${new Date().toLocaleTimeString()} · ${all.length} headlines scanned`;
+      $("diag_error").textContent = "—";
     } catch (e) {
-      // keep old text
+      $("diag_error").textContent = "news: " + String(e).slice(0,160);
     }
   }
 
@@ -380,6 +406,7 @@ def render_html(ctx):
       await refreshNews(idx);
       setUpdatedNow(true);
     } catch(e){
+      $("diag_error").textContent = String(e).slice(0,160);
       setUpdatedNow(false);
     }
   }
@@ -463,12 +490,15 @@ def main():
         "top_rows": rows_for_html(df_top),
         "mike_rows": rows_for_html(df_mike),
         "refresh_symbols_json": json.dumps(refresh_symbols),
-        "worker_base": WORKER_BASE
+        "worker_base": WORKER_BASE = "https://broken-night-0891.architek-eth.workers.dev/"
     })
     with open(os.path.join(OUT_DIR, "index.html"), "w", encoding="utf-8") as f:
         f.write(html)
 
-    print("✅ Built page using Cloudflare Worker for live quotes/news + clean summary paragraph.")
+    print("✅ Built page with Worker diagnostics + readable summary. Set WORKER_BASE correctly.")
+    if "YOUR-WORKER-NAME" in WORKER_BASE:
+        print("⚠️  Reminder: You must set WORKER_BASE to your actual Cloudflare Worker URL.")
+        sys.exit(1)
 
 if __name__ == "__main__":
     try:

@@ -20,7 +20,8 @@ TZ = "America/Chicago"
 # >>>>>>>>>>>>>>>> SET THIS TO YOUR WORKER URL (no trailing slash) <<<<<<<<<<<<<<
 WORKER_BASE = "https://polished-moon-50d8.architek-eth.workers.dev"
 
-MIKE_TICKERS = ["VOO","VOOG","VUG","VDIGX","QQQM","AAPL","NVDA","IVV","IWF","SE","FBTC","VV","FXAIZ","AMZN","CLX","CRM","GBTC","ALRM"]
+
+MIKE_TICKERS = ["VOO","VOOG","VUG","VDIGX","QQQM","AAPL","NVDA","IVV","IWF","SE","FBTC","VV","FXAIx","AMZN","CLX","CRM","GBTC","ALRM"]
 # ---------------------------------------------------------------
 
 def clean_output_dir():
